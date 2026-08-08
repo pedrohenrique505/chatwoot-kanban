@@ -12,6 +12,7 @@ vi.mock('vue-i18n', () => ({
         'KANBAN.CARD.UNKNOWN_CONTACT': 'Unknown Contact',
         'KANBAN.CARD.UNKNOWN_INBOX': 'Unknown Inbox',
         'KANBAN.CARD.NO_LINKED_CONVERSATION': 'No linked conversation',
+        'KANBAN.CARD.EDIT': 'Edit card',
         'KANBAN.ACTIONS.REMOVE_CARD': 'Remove',
       };
 
@@ -66,11 +67,22 @@ const buildManualCard = overrides =>
     ...overrides,
   });
 
-const mountCard = ({ card = buildCard(), activeActionKey = '' } = {}) =>
+const mountCard = ({
+  card = buildCard(),
+  activeActionKey = '',
+  wonStageId = null,
+  lostStageId = null,
+  reasons = [],
+  lostReasonRequired = false,
+} = {}) =>
   shallowMount(KanbanConversationCard, {
     props: {
       card,
       activeActionKey,
+      wonStageId,
+      lostStageId,
+      reasons,
+      lostReasonRequired,
     },
     global: {
       stubs: {
@@ -185,14 +197,14 @@ describe('KanbanConversationCard', () => {
     expect(wrapper.text()).not.toContain('+1');
   });
 
-  it('emits openDetails when the card surface is clicked', async () => {
+  it('emits openConversation when the card surface is clicked', async () => {
     const card = buildCard();
     const wrapper = mountCard({ card });
 
     await wrapper.find('article').trigger('click');
 
-    expect(wrapper.emitted('openDetails')).toHaveLength(1);
-    expect(wrapper.emitted('openDetails')[0][0]).toEqual(card);
+    expect(wrapper.emitted('openConversation')).toHaveLength(1);
+    expect(wrapper.emitted('openConversation')[0][0]).toEqual(card);
   });
 
   it('renders subject above contact name with title when subject is present', () => {
@@ -215,25 +227,22 @@ describe('KanbanConversationCard', () => {
     expect(wrapper.text()).toContain('Sales Inbox');
   });
 
-  it('emits openDetails even when conversationId is null', async () => {
-    const card = buildManualCard();
-    const wrapper = mountCard({ card });
+  it('does not emit openConversation when the card has no conversation', async () => {
+    const wrapper = mountCard({ card: buildManualCard() });
 
     await wrapper.find('article').trigger('click');
 
-    expect(wrapper.emitted('openDetails')).toHaveLength(1);
-    expect(wrapper.emitted('openDetails')[0][0]).toEqual(card);
+    expect(wrapper.emitted('openConversation')).toBeUndefined();
   });
 
-  it('does not emit openConversation from avatar when conversation is missing', async () => {
-    const wrapper = mountCard({ card: buildManualCard() });
+  it('emits openDetails when the settings action is clicked', async () => {
+    const card = buildManualCard();
+    const wrapper = mountCard({ card });
 
-    await wrapper
-      .find('[data-testid="kanban-card-contact-avatar"]')
-      .trigger('click');
+    await wrapper.find('[data-testid="kanban-card-settings"]').trigger('click');
 
     expect(wrapper.emitted('openConversation')).toBeUndefined();
-    expect(wrapper.emitted('openDetails')).toBeUndefined();
+    expect(wrapper.emitted('openDetails')).toEqual([[card]]);
   });
 
   it('does not emit openDetails when clicking remove button', async () => {
@@ -254,24 +263,14 @@ describe('KanbanConversationCard', () => {
     expect(wrapper.emitted('removeCard')).toEqual([[card]]);
   });
 
-  it('emits openConversation when clicking the contact avatar with a conversation', async () => {
-    const card = buildCard();
-    const wrapper = mountCard({ card });
-
-    await wrapper
-      .find('[data-testid="kanban-card-contact-avatar"]')
-      .trigger('click');
-
-    expect(wrapper.emitted('openConversation')).toHaveLength(1);
-    expect(wrapper.emitted('openConversation')[0][0]).toEqual(card);
-    expect(wrapper.emitted('openDetails')).toBeUndefined();
-  });
-
-  it('marks remove button as no-drag', async () => {
+  it('marks card action buttons as no-drag', () => {
     const wrapper = mountCard();
 
     expect(
       wrapper.find('[data-testid="kanban-card-remove"]').classes()
+    ).toContain('no-drag');
+    expect(
+      wrapper.find('[data-testid="kanban-card-settings"]').classes()
     ).toContain('no-drag');
   });
 
@@ -283,11 +282,13 @@ describe('KanbanConversationCard', () => {
     expect(removeButton.attributes('title')).toBe('Remove');
   });
 
-  it('does not render an edit button', () => {
+  it('renders an accessible settings button', () => {
     const wrapper = mountCard();
+    const settingsButton = wrapper.find('[data-testid="kanban-card-settings"]');
 
-    expect(wrapper.find('.i-lucide-pencil').exists()).toBe(false);
-    expect(wrapper.text()).not.toContain('Edit');
+    expect(settingsButton.attributes('aria-label')).toBe('Edit card');
+    expect(settingsButton.attributes('title')).toBe('Edit card');
+    expect(settingsButton.find('.i-lucide-settings').exists()).toBe(true);
   });
 
   it('renders inbox badge separately from the inbox pill', () => {
@@ -321,5 +322,46 @@ describe('KanbanConversationCard', () => {
     expect(wrapper.find('textarea').exists()).toBe(false);
     expect(wrapper.text()).not.toContain('Show notes');
     expect(wrapper.text()).not.toContain('Hide notes');
+  });
+
+  it('passes status props through and re-emits changeStatus with the card', () => {
+    const card = buildCard({ kanbanStageId: 2 });
+    const wrapper = mountCard({
+      card,
+      wonStageId: 3,
+      lostStageId: 4,
+      reasons: [{ id: 1, title: 'Price', reason_type: 'lost' }],
+      lostReasonRequired: true,
+    });
+
+    const badge = wrapper.findComponent({ name: 'KanbanCardStatusBadge' });
+    expect(badge.exists()).toBe(true);
+    expect(badge.props()).toMatchObject({
+      kanbanStageId: 2,
+      wonStageId: 3,
+      lostStageId: 4,
+      lostReasonRequired: true,
+    });
+
+    const payload = { targetStageId: 4, reasonId: 1 };
+    badge.vm.$emit('change', payload);
+
+    expect(wrapper.emitted('changeStatus')).toEqual([[card, payload]]);
+  });
+
+  it('shows the formatted card value when value is present', () => {
+    const wrapper = mountCard({ card: buildCard({ value: 1234.5 }) });
+
+    expect(wrapper.find('[data-testid="kanban-card-value"]').exists()).toBe(
+      true
+    );
+  });
+
+  it('does not show a value badge when value is missing', () => {
+    const wrapper = mountCard({ card: buildCard({ value: 0 }) });
+
+    expect(wrapper.find('[data-testid="kanban-card-value"]').exists()).toBe(
+      false
+    );
   });
 });

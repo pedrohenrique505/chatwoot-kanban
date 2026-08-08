@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router';
 import { useStore } from 'vuex';
 import { useElementSize } from '@vueuse/core';
 import BackButton from '../BackButton.vue';
+import EmbeddedBackButton from './EmbeddedBackButton.vue';
 import InboxName from '../InboxName.vue';
 import MoreActions from './MoreActions.vue';
 import Avatar from 'next/avatar/Avatar.vue';
@@ -14,8 +15,11 @@ import wootConstants from 'dashboard/constants/globals';
 import { conversationListPageURL } from 'dashboard/helper/URLHelper';
 import { snoozedReopenTime } from 'dashboard/helper/snoozeHelpers';
 import { useInbox } from 'dashboard/composables/useInbox';
-import { useUISettings } from 'dashboard/composables/useUISettings';
 import { useI18n } from 'vue-i18n';
+import {
+  useContactSidebar,
+  useEmbeddedConversation,
+} from 'dashboard/composables/useEmbeddedConversation';
 
 const props = defineProps({
   chat: {
@@ -35,7 +39,8 @@ const route = useRoute();
 const conversationHeader = ref(null);
 const { width } = useElementSize(conversationHeader);
 const { isAWebWidgetInbox } = useInbox();
-const { uiSettings, updateUISettings } = useUISettings();
+const embedded = useEmbeddedConversation();
+const { toggleContactSidebar } = useContactSidebar();
 const headerSeparator = '\u2022';
 
 const currentChat = computed(() => store.getters.getSelectedChat);
@@ -94,17 +99,7 @@ const inbox = computed(() => {
 const hasSlaPolicyId = computed(() => props.chat?.sla_policy_id);
 
 const toggleContactDetails = () => {
-  const shouldOpenContactDetails = !uiSettings.value.is_contact_sidebar_open;
-  const nextUISettings = {
-    is_contact_sidebar_open: shouldOpenContactDetails,
-  };
-
-  if (shouldOpenContactDetails) {
-    nextUISettings.is_copilot_panel_open = false;
-  }
-
-  updateUISettings(nextUISettings);
-  emit('toggleContactDetails', shouldOpenContactDetails);
+  emit('toggleContactDetails', toggleContactSidebar());
 };
 </script>
 
@@ -114,8 +109,9 @@ const toggleContactDetails = () => {
     class="flex flex-row items-center justify-between flex-1 w-full min-w-0 gap-3 px-3 py-2 min-h-12"
   >
     <div class="flex items-center justify-start flex-1 min-w-0">
+      <EmbeddedBackButton v-if="embedded" class="ltr:mr-2 rtl:ml-2" />
       <BackButton
-        v-if="showBackButton"
+        v-else-if="showBackButton"
         :back-url="backButtonUrl"
         icon-only
         class="ltr:mr-2 rtl:ml-2"

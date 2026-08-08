@@ -57,7 +57,10 @@ import {
 } from '../store/modules/conversations/helpers/actionHelpers';
 import { matchesFilters } from '../store/modules/conversations/helpers/filterHelpers';
 import { CONVERSATION_EVENTS } from '../helper/AnalyticsHelper/events';
-import { INBOX_TYPES } from 'dashboard/helper/inbox';
+import {
+  INBOX_TYPES,
+  isInboxVisibleInAllConversations,
+} from 'dashboard/helper/inbox';
 
 const props = defineProps({
   conversationInbox: { type: [String, Number], default: 0 },
@@ -312,13 +315,13 @@ const conversationListPagination = computed(() => {
   return currentPage.value + 1;
 });
 
+// Every other conversation route sets one of these props, so their absence is
+// what identifies the all-conversations view — including while a conversation
+// is open, which the list stays mounted for.
 const isAllConversationsView = computed(() => {
   return (
-    route.name === 'home' &&
-    currentPageFilterKey.value === wootConstants.ASSIGNEE_TYPE.ALL &&
     !hasAppliedFiltersOrActiveFolders.value &&
     !isSearching.value &&
-    !searchQuery.value &&
     !props.conversationInbox &&
     !props.teamId &&
     !props.label &&
@@ -330,7 +333,7 @@ const isAllConversationsView = computed(() => {
 const visibleInAllConversationInboxIds = computed(() => {
   return new Set(
     inboxesList.value
-      .filter(inboxItem => inboxItem.show_in_all_conversations !== false)
+      .filter(isInboxVisibleInAllConversations)
       .map(inboxItem => Number(inboxItem.id))
   );
 });

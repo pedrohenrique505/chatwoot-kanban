@@ -3,6 +3,7 @@ import { createStore } from 'vuex';
 import { ref } from 'vue';
 
 import ConversationHeader from '../ConversationHeader.vue';
+import { EMBEDDED_CONVERSATION } from 'dashboard/composables/useEmbeddedConversation';
 
 vi.mock('vue-router', async importOriginal => {
   const actual = await importOriginal();
@@ -37,6 +38,8 @@ describe('ConversationHeader', () => {
   const createWrapper = ({
     isContactSidebarOpen = false,
     isCopilotPanelOpen = true,
+    embeddedContext = null,
+    showBackButton = false,
   } = {}) => {
     uiSettings = {
       is_contact_sidebar_open: isContactSidebarOpen,
@@ -82,9 +85,13 @@ describe('ConversationHeader', () => {
     wrapper = shallowMount(ConversationHeader, {
       props: {
         chat,
+        showBackButton,
       },
       global: {
         plugins: [store],
+        provide: embeddedContext
+          ? { [EMBEDDED_CONVERSATION]: ref(embeddedContext) }
+          : {},
         stubs: {
           BackButton: {
             name: 'BackButton',
@@ -126,8 +133,7 @@ describe('ConversationHeader', () => {
           },
           NextButton: {
             name: 'NextButton',
-            template:
-              '<button data-testid="conversation-header-search-button" />',
+            template: '<button v-bind="$attrs" />',
           },
           SLACardLabel: {
             name: 'SLACardLabel',
@@ -310,6 +316,22 @@ describe('ConversationHeader', () => {
     expect(searchButton.attributes('aria-label')).toBe(
       'Search in conversation'
     );
+  });
+
+  it('replaces the route back button with the embedded one', () => {
+    createWrapper({
+      showBackButton: true,
+      embeddedContext: {
+        sidebarOpen: true,
+        setSidebarOpen: vi.fn(),
+        goBack: vi.fn(),
+      },
+    });
+
+    expect(wrapper.findComponent({ name: 'EmbeddedBackButton' }).exists()).toBe(
+      true
+    );
+    expect(wrapper.findComponent({ name: 'BackButton' }).exists()).toBe(false);
   });
 
   it('emits search action without toggling contact details', async () => {

@@ -33,6 +33,9 @@ export const conversationUrl = ({
   return url;
 };
 
+export const kanbanConversationUrl = ({ accountId, boardId, conversationId }) =>
+  `accounts/${accountId}/kanban/${boardId}/conversations/${conversationId}`;
+
 export const conversationListPageURL = ({
   accountId,
   conversationType = '',
@@ -111,15 +114,6 @@ export const hasValidAvatarUrl = avatarUrl => {
   } catch (error) {
     return false;
   }
-};
-
-export const timeStampAppendedURL = dataUrl => {
-  const url = new URL(dataUrl);
-  if (!url.searchParams.has('t')) {
-    url.searchParams.append('t', Date.now());
-  }
-
-  return url.toString();
 };
 
 export const getHostNameFromURL = url => {

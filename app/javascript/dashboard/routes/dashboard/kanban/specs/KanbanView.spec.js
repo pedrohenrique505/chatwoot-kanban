@@ -9,7 +9,6 @@ import { useAlert } from 'dashboard/composables';
 import kanbanBoardsModule from 'dashboard/store/modules/kanbanBoards';
 import {
   KANBAN_STAGE_COLOR_OPTIONS,
-  getKanbanStageBodyColorClass,
   getKanbanStageColorClass,
 } from 'dashboard/helper/kanbanStageColors';
 import enKanbanMessages from 'dashboard/i18n/locale/en/kanban.json';
@@ -45,8 +44,8 @@ vi.mock('dashboard/composables', () => ({
 
 vi.mock('dashboard/helper/URLHelper', () => ({
   frontendURL: path => path,
-  conversationUrl: ({ accountId, id }) =>
-    `/app/accounts/${accountId}/conversations/${id}`,
+  kanbanConversationUrl: ({ accountId, boardId, conversationId }) =>
+    `/app/accounts/${accountId}/kanban/${boardId}/conversations/${conversationId}`,
 }));
 
 vi.mock('shared/helpers/mitt', () => ({
@@ -404,6 +403,10 @@ const emitKanbanRealtimeEvent = async payload => {
   await flushPromises();
   await nextTick();
 };
+
+beforeEach(() => {
+  sessionStorage.clear();
+});
 
 describe('KanbanView realtime events', () => {
   beforeEach(() => {
@@ -1463,8 +1466,35 @@ describe('KanbanView drag and drop', () => {
     await flushPromises();
 
     expect(mockPush).toHaveBeenCalledWith({
-      path: '/app/accounts/1/conversations/123',
+      name: 'kanban_board_conversation',
+      params: {
+        accountId: '1',
+        boardId: 10,
+        conversationId: 123,
+      },
+      state: { fromEmbedded: false },
     });
+  });
+
+  it('opens the kanban conversation URL in a new tab on ctrl-click', async () => {
+    const wrapper = await mountView();
+    const cardComponent = wrapper.findComponent({
+      name: 'KanbanConversationCard',
+    });
+
+    cardComponent.vm.$emit(
+      'openConversation',
+      { id: 501, conversationId: 123 },
+      { ctrlKey: true }
+    );
+    await flushPromises();
+
+    expect(window.open).toHaveBeenCalledWith(
+      'http://localhost:3000/app/accounts/1/kanban/10/conversations/123',
+      '_blank',
+      'noopener,noreferrer'
+    );
+    expect(mockPush).not.toHaveBeenCalled();
   });
 
   it('does not navigate from card openConversation event without conversationId', async () => {
@@ -1506,7 +1536,7 @@ describe('KanbanView drag and drop', () => {
 
     const modal = wrapper.findComponent({ name: 'WootModal' });
     expect(modal.props('showCloseButton')).toBe(false);
-    expect(modal.props('size')).toBe('modal-big');
+    expect(modal.props('size')).toBe('modal-fit-content');
   });
 
   it('closes opportunity modal and clears selected card', async () => {
@@ -1585,7 +1615,7 @@ describe('KanbanView drag and drop', () => {
     expect(KanbanBoardsAPI.show).not.toHaveBeenCalled();
   });
 
-  it('opens conversation in a new tab on modal openConversation event', async () => {
+  it('opens conversation in the same tab on modal openConversation event', async () => {
     const wrapper = await mountView();
     const cardComponent = wrapper.findComponent({
       name: 'KanbanConversationCard',
@@ -1600,34 +1630,16 @@ describe('KanbanView drag and drop', () => {
     modal.vm.$emit('openConversation', { conversationId: 123 });
     await flushPromises();
 
-    expect(window.open).toHaveBeenCalledWith(
-      'http://localhost:3000/app/accounts/1/conversations/123',
-      '_blank',
-      'noopener,noreferrer'
-    );
-    expect(mockPush).not.toHaveBeenCalledWith({
-      path: '/app/accounts/1/conversations/123',
+    expect(window.open).not.toHaveBeenCalled();
+    expect(mockPush).toHaveBeenCalledWith({
+      name: 'kanban_board_conversation',
+      params: {
+        accountId: '1',
+        boardId: 10,
+        conversationId: 123,
+      },
+      state: { fromEmbedded: false },
     });
-  });
-
-  it('keeps modal open after opening conversation in a new tab', async () => {
-    const wrapper = await mountView();
-    const cardComponent = wrapper.findComponent({
-      name: 'KanbanConversationCard',
-    });
-
-    cardComponent.vm.$emit('openDetails', { id: 501, conversationId: 123 }, {});
-    await nextTick();
-
-    const modal = wrapper.findComponent({
-      name: 'KanbanOpportunityDetailsModal',
-    });
-    modal.vm.$emit('openConversation', { conversationId: 123 });
-    await flushPromises();
-
-    expect(
-      wrapper.findComponent({ name: 'KanbanOpportunityDetailsModal' }).exists()
-    ).toBe(true);
   });
 });
 
@@ -1662,42 +1674,24 @@ describe('KanbanView header navigation', () => {
     expect(dropdown.text()).toContain('Renewals Board');
     expect(dropdown.text()).toContain('KANBAN.OVERVIEW.CREATE_BOARD');
     expect(
-      wrapper.find('[data-testid="kanban-add-board-inline-toggle"]').exists()
+      wrapper.find('[data-testid="kanban-board-switcher-create-new"]').exists()
     ).toBe(true);
   });
 
-  it('shows an inline input and confirm button to create a board from the dropdown', async () => {
+  it('navigates to the create board form from the dropdown', async () => {
     const wrapper = await mountView();
 
     await wrapper
       .find('[data-testid="kanban-board-switcher"]')
       .trigger('click');
     await wrapper
-      .find('[data-testid="kanban-add-board-inline-toggle"]')
+      .find('[data-testid="kanban-board-switcher-create-new"]')
       .trigger('click');
 
-    expect(
-      wrapper.find('[data-testid="kanban-add-board-inline-input"]').exists()
-    ).toBe(true);
-
-    await wrapper
-      .find('[data-testid="kanban-add-board-inline-input"]')
-      .setValue('Support Board');
-    KanbanBoardsAPI.create.mockResolvedValueOnce({
-      data: { id: 99, name: 'Support Board' },
+    expect(mockPush).toHaveBeenCalledWith({
+      name: 'kanban_board_create_form',
+      params: { accountId: '1' },
     });
-    await wrapper
-      .find('[data-testid="kanban-board-switcher-dropdown"] form')
-      .trigger('submit');
-    await flushPromises();
-
-    expect(KanbanBoardsAPI.create).toHaveBeenCalledWith({
-      kanban_board: { name: 'Support Board', position: 2 },
-    });
-    expect(mockPush).not.toHaveBeenCalled();
-    expect(
-      wrapper.find('[data-testid="kanban-board-switcher-dropdown"]').exists()
-    ).toBe(true);
   });
 
   it('does not render a create board button in the board header', async () => {
@@ -1777,7 +1771,22 @@ describe('KanbanView header navigation', () => {
     });
   });
 
+  it('returns to the kanban overview when the board is inaccessible', async () => {
+    const wrapper = await mountView();
+    KanbanBoardsAPI.show.mockRejectedValueOnce({
+      response: { status: 404 },
+    });
+
+    await wrapper.vm.$.setupState.showBoard(99);
+
+    expect(mockReplace).toHaveBeenCalledWith({
+      name: 'kanban_boards',
+      params: { accountId: '1' },
+    });
+  });
+
   it('creates a stage with Nova etapa when that temporary name is available', async () => {
+    window.HTMLElement.prototype.scrollIntoView = vi.fn();
     mockT.mockImplementation(key => {
       const translations = {
         'KANBAN.ACTIONS.NEW_STAGE_NAME': 'Nova etapa',
@@ -2009,12 +2018,6 @@ describe('KanbanView header navigation', () => {
   it('keeps rendering existing stage colors and falls back to slate', () => {
     expect(getKanbanStageColorClass('blue')).toBe('bg-n-blue-9');
     expect(getKanbanStageColorClass('unexpected')).toBe('bg-n-slate-9');
-    expect(getKanbanStageBodyColorClass('blue')).toBe(
-      'bg-n-blue-3 dark:bg-n-blue-2'
-    );
-    expect(getKanbanStageBodyColorClass('unexpected')).toBe(
-      'bg-n-slate-3 dark:bg-n-slate-2'
-    );
   });
 
   it('shows board settings button for administrators', async () => {
@@ -2070,7 +2073,7 @@ describe('KanbanView header navigation', () => {
       .trigger('click');
 
     expect(mockPush).toHaveBeenCalledWith({
-      name: 'kanban_board_settings',
+      name: 'kanban_board_edit_form',
       params: { accountId: '1', boardId: 10 },
     });
   });
@@ -2107,7 +2110,7 @@ describe('KanbanView header navigation', () => {
       wrapper.find('[data-testid="kanban-board-switcher-dropdown"]').exists()
     ).toBe(true);
     expect(
-      wrapper.find('[data-testid="kanban-add-board-inline-toggle"]').exists()
+      wrapper.find('[data-testid="kanban-board-switcher-create-new"]').exists()
     ).toBe(true);
   });
 

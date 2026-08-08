@@ -77,16 +77,33 @@ vi.mock('vue-i18n', () => ({
 vi.mock('dashboard/api/kanbanBoards', () => ({
   default: {
     showCardById: vi.fn(),
+    updateCardById: vi.fn(),
     updateCardDetailsById: vi.fn(),
     getCardLabels: vi.fn(),
     updateCardLabels: vi.fn(),
     getCardAssignees: vi.fn(),
     updateCardAssignees: vi.fn(),
+    getCardProducts: vi.fn(),
+    createCardProduct: vi.fn(),
+    updateCardProduct: vi.fn(),
+    deleteCardProduct: vi.fn(),
+    showBoard: vi.fn(),
+    getReasons: vi.fn(),
+  },
+}));
+
+vi.mock('dashboard/api/products', () => ({
+  default: {
+    search: vi.fn(),
   },
 }));
 
 vi.mock('dashboard/composables', () => ({
   useAlert: vi.fn(),
+}));
+
+vi.mock('dashboard/composables/useAdmin', () => ({
+  useAdmin: () => ({ isAdmin: { value: false } }),
 }));
 
 vi.mock('shared/helpers/clipboard', () => ({
@@ -99,6 +116,7 @@ vi.mock('dashboard/composables/store', async () => {
   return {
     useStore: () => ({ dispatch: storeMocks.dispatch }),
     useMapGetter: () => computed(() => storeMocks.labels),
+    useStoreGetters: () => ({ getCurrentRole: computed(() => 'agent') }),
   };
 });
 
@@ -230,18 +248,44 @@ const assignableUsers = [
   { id: 8, name: 'John Agent', avatar_url: 'john.png' },
 ];
 
+const tabBarStub = {
+  name: 'TabBar',
+  props: ['tabs', 'initialActiveTab'],
+  emits: ['tabChanged'],
+  template: `
+    <div>
+      <button
+        v-for="(tab, index) in tabs"
+        :key="index"
+        type="button"
+        :data-testid="'kanban-opportunity-tab-' + index"
+        @click="$emit('tabChanged', tab)"
+      >
+        {{ tab.label }}
+      </button>
+    </div>
+  `,
+};
+
 const mountModal = async ({
   card = buildCard(),
   resolveLoad = true,
   resolveLabels = true,
   resolveAssignees = true,
+  resolveProducts = true,
   accountLabels = labels,
   assignedLabels = [labels[0]],
   assignedUsers = [assignableUsers[0]],
   availableAssignableUsers = assignableUsers,
+  cardProducts = [],
+  board = null,
+  reasons = [],
 } = {}) => {
   storeMocks.labels = accountLabels;
   storeMocks.dispatch.mockResolvedValue();
+
+  KanbanBoardsAPI.showBoard.mockResolvedValue({ data: board || {} });
+  KanbanBoardsAPI.getReasons.mockResolvedValue({ data: reasons });
 
   if (resolveLabels) {
     KanbanBoardsAPI.getCardLabels.mockResolvedValue({
@@ -256,6 +300,10 @@ const mountModal = async ({
         assignable_users: availableAssignableUsers,
       },
     });
+  }
+
+  if (resolveProducts) {
+    KanbanBoardsAPI.getCardProducts.mockResolvedValue({ data: cardProducts });
   }
 
   if (resolveLoad) {
@@ -275,6 +323,7 @@ const mountModal = async ({
         Popover: popoverStub,
         LabelDropdown: labelDropdownStub,
         Editor: editorStub,
+        TabBar: tabBarStub,
       },
     },
   });
@@ -860,5 +909,46 @@ describe('KanbanOpportunityDetailsModal', () => {
       .trigger('click');
 
     expect(wrapper.emitted('removeCard')[0][0]).toMatchObject(card);
+  });
+
+  it('does not render the status badge when the board has no won/lost stages', async () => {
+    const wrapper = await mountModal();
+
+    expect(
+      wrapper.find('[data-testid="kanban-card-status-badge"]').exists()
+    ).toBe(false);
+  });
+
+  it('renders the status badge and updates the card status when configured', async () => {
+    KanbanBoardsAPI.updateCardById.mockResolvedValue({
+      data: { ...buildCard(), kanban_stage_id: 20 },
+    });
+
+    const wrapper = await mountModal({
+      card: buildCard({ kanban_stage_id: 15 }),
+      board: {
+        won_stage_id: 20,
+        lost_stage_id: 30,
+        lost_reason_required: false,
+      },
+      reasons: [{ id: 1, title: 'Good fit', reason_type: 'won' }],
+    });
+
+    expect(
+      wrapper.find('[data-testid="kanban-card-status-badge"]').exists()
+    ).toBe(true);
+
+    await wrapper
+      .find('[data-testid="kanban-card-status-option-won"]')
+      .trigger('click');
+    await wrapper
+      .find('[data-testid="kanban-card-status-confirm"]')
+      .trigger('click');
+    await flushPromises();
+
+    expect(KanbanBoardsAPI.updateCardById).toHaveBeenCalledWith(10, 501, {
+      card: { kanban_stage_id: 20, kanban_reason_id: null },
+    });
+    expect(wrapper.emitted('updated')).toBeTruthy();
   });
 });

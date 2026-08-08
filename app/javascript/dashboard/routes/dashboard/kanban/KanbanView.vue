@@ -8,14 +8,25 @@ import Draggable from 'vuedraggable';
 
 import { useAlert } from 'dashboard/composables';
 import { useAdmin } from 'dashboard/composables/useAdmin';
+import { useKanbanStageOrder } from 'dashboard/composables/useKanbanStageOrder';
 import { useMapGetter, useStore } from 'dashboard/composables/store';
+import {
+  getCardStatusChangeErrorMessage,
+  isDirectWonLostTransitionError,
+} from 'dashboard/helper/kanbanCardStatus';
 import KanbanBoardsAPI from 'dashboard/api/kanbanBoards';
+import NextButton from 'dashboard/components-next/button/Button.vue';
 import TagMultiSelectComboBox from 'dashboard/components-next/combobox/TagMultiSelectComboBox.vue';
-import { frontendURL, conversationUrl } from 'dashboard/helper/URLHelper';
+import { frontendURL, kanbanConversationUrl } from 'dashboard/helper/URLHelper';
+import { pushEmbedded } from 'dashboard/helper/embeddedConversationHistory';
+import {
+  getKanbanBoardSnapshot,
+  removeKanbanBoardSnapshot,
+  saveKanbanBoardSnapshot,
+} from 'dashboard/helper/kanbanBoardSnapshot';
 import {
   DEFAULT_KANBAN_STAGE_COLOR,
   KANBAN_STAGE_COLOR_OPTIONS,
-  getKanbanStageBodyColorClass,
   getKanbanStageColorOption,
 } from 'dashboard/helper/kanbanStageColors';
 import { emitter } from 'shared/helpers/mitt';
@@ -23,7 +34,6 @@ import { BUS_EVENTS } from 'shared/constants/busEvents';
 import KanbanConversationCard from './KanbanConversationCard.vue';
 import KanbanOpportunityDetailsModal from './KanbanOpportunityDetailsModal.vue';
 import KanbanOpportunityPicker from './KanbanOpportunityPicker.vue';
-import { useKanbanBoardCreation } from './useKanbanBoardCreation';
 
 const route = useRoute();
 const router = useRouter();
@@ -33,27 +43,20 @@ const store = useStore();
 const agents = useMapGetter('agents/getAgents');
 const boards = useMapGetter('kanbanBoards/kanbanBoards');
 const inboxes = useMapGetter('inboxes/getAllInboxes');
-const {
-  showCreateBoardDialog: isAddingBoardInline,
-  createBoardError: addBoardInlineError,
-  isCreatingBoard: isAddingBoardInlineSubmitting,
-  openCreateBoardDialog: openAddBoardInline,
-  closeCreateBoardDialog: closeAddBoardInline,
-  createBoard: submitNewBoard,
-} = useKanbanBoardCreation({ boards, t, navigateOnCreate: false });
 const isFetchingBoards = useMapGetter('kanbanBoards/kanbanBoardsLoading');
 const { isAdmin } = useAdmin();
 const selectedBoard = ref(null);
 const isFetchingBoard = ref(false);
 const isCreatingStage = ref(false);
 const selectedOpportunityCardId = ref(null);
+const opportunityModalRef = ref(null);
+const showUnsavedOpportunityChangesConfirm = ref(false);
+const isSavingOpportunityBeforeExit = ref(false);
 const activeActionKey = ref('');
 const hasError = ref(false);
 const selectedInboxIds = ref([]);
 const selectedAssigneeIds = ref([]);
 const isBoardDropdownOpen = ref(false);
-const newBoardName = ref('');
-const newBoardNameInput = ref(null);
 const openStageMenuId = ref(null);
 const editingStageId = ref(null);
 const stageNames = ref({});
@@ -169,6 +172,11 @@ const stageListModel = computed({
     selectedBoard.value = { ...selectedBoard.value, stages: nextStages };
   },
 });
+const { isTerminalStage, canMoveStage } = useKanbanStageOrder({
+  stages,
+  wonStageId: computed(() => selectedBoard.value?.wonStageId),
+  lostStageId: computed(() => selectedBoard.value?.lostStageId),
+});
 const hasActiveFilters = computed(
   () =>
     selectedInboxIds.value.length > 0 || selectedAssigneeIds.value.length > 0
@@ -235,16 +243,30 @@ const isNameTakenError = error => {
   return errorMessage.includes('name') && errorMessage.includes('taken');
 };
 
+const isSpecialStageOrderError = error =>
+  error?.response?.data?.error === 'special_stages_must_be_last';
+
 const showActionError = (error, fallbackMessage) => {
-  const message = isNameTakenError(error)
-    ? t('KANBAN.ACTIONS.STAGE_NAME_TAKEN')
-    : getErrorMessage(error, fallbackMessage);
+  let message = getErrorMessage(error, fallbackMessage);
+  if (isNameTakenError(error)) message = t('KANBAN.ACTIONS.STAGE_NAME_TAKEN');
+  if (isSpecialStageOrderError(error))
+    message = t('KANBAN.ACTIONS.STAGE_ORDER_INVALID');
+
   useAlert(message);
 };
 
 const isRefreshRequiredError = error =>
   error?.response?.status === 409 &&
   error?.response?.data?.error === 'refresh_required';
+
+const isLostReasonRequiredError = error =>
+  error?.response?.data?.error === 'lost_reason_required';
+
+const formatCurrency = value =>
+  new Intl.NumberFormat('pt-BR', {
+    style: 'currency',
+    currency: 'BRL',
+  }).format(Number(value) || 0);
 
 const getStageCardsError = stageId => stageCardsErrors.value[stageId] || '';
 
@@ -469,12 +491,99 @@ const showBoard = async boardId => {
     stageCardsLoading.value = {};
     stageCardsErrors.value = {};
     selectedBoard.value = normalizeKanbanPayload(response.data);
-  } catch {
+  } catch (error) {
     hasError.value = true;
     selectedBoard.value = null;
+    if ([403, 404].includes(error?.response?.status)) {
+      router.replace({
+        name: 'kanban_boards',
+        params: { accountId: route.params.accountId },
+      });
+    }
   } finally {
     isFetchingBoard.value = false;
   }
+};
+
+const getStageScrollElement = stageId =>
+  boardScrollContainer.value?.querySelector(
+    `[data-stage-scroll-id="${stageId}"]`
+  );
+
+const saveBoardSnapshot = () => {
+  if (!selectedBoard.value?.id) return;
+
+  saveKanbanBoardSnapshot({
+    accountId: route.params.accountId,
+    boardId: selectedBoard.value.id,
+    snapshot: {
+      scrollLeft: boardScrollContainer.value?.scrollLeft ?? 0,
+      stages: Object.fromEntries(
+        stages.value.map(stage => [
+          stage.id,
+          {
+            loadedCount: stage.cards.length,
+            scrollTop: getStageScrollElement(stage.id)?.scrollTop ?? 0,
+          },
+        ])
+      ),
+      filters: {
+        inboxIds: selectedInboxIds.value,
+        assigneeIds: selectedAssigneeIds.value,
+      },
+    },
+  });
+};
+
+const applyBoardSnapshot = async snapshot => {
+  // showBoard already loaded every stage's first page, so only the stages
+  // that had been paged past it need to be re-fetched.
+  await Promise.all(
+    stages.value.map(async stage => {
+      const { loadedCount } = snapshot.stages[stage.id] ?? {};
+      if (!loadedCount || loadedCount <= stage.cards.length) return;
+
+      const page = await fetchStageCardsPage(stage.id, { limit: loadedCount });
+      applyStageFirstPage(stage.id, page);
+    })
+  );
+
+  await nextTick();
+
+  if (boardScrollContainer.value) {
+    boardScrollContainer.value.scrollLeft = snapshot.scrollLeft;
+  }
+
+  stages.value.forEach(stage => {
+    const stageScrollElement = getStageScrollElement(stage.id);
+    if (stageScrollElement) {
+      stageScrollElement.scrollTop = snapshot.stages[stage.id]?.scrollTop ?? 0;
+    }
+  });
+};
+
+const showBoardWithSnapshot = async boardId => {
+  const snapshot = getKanbanBoardSnapshot({
+    accountId: route.params.accountId,
+    boardId,
+  });
+
+  if (!snapshot) {
+    await showBoard(boardId);
+    return;
+  }
+
+  selectedInboxIds.value = snapshot.filters.inboxIds;
+  selectedAssigneeIds.value = snapshot.filters.assigneeIds;
+
+  await showBoard(boardId);
+  if (!selectedBoard.value) return;
+
+  await applyBoardSnapshot(snapshot);
+  removeKanbanBoardSnapshot({
+    accountId: route.params.accountId,
+    boardId,
+  });
 };
 
 const refreshSelectedBoard = async () => {
@@ -516,7 +625,7 @@ const openBoardSettings = () => {
   if (!selectedBoard.value?.id) return;
 
   router.push({
-    name: 'kanban_board_settings',
+    name: 'kanban_board_edit_form',
     params: {
       accountId: route.params.accountId,
       boardId: selectedBoard.value.id,
@@ -837,7 +946,18 @@ const onCardDragChange = async (stage, event) => {
     );
     await refreshStageFirstPages([card.kanbanStageId, stage.id]);
   } catch (error) {
-    showActionError(error, t('KANBAN.ACTIONS.REORDER_CARD_ERROR'));
+    let message = getErrorMessage(
+      error,
+      t('KANBAN.ACTIONS.REORDER_CARD_ERROR')
+    );
+    if (isLostReasonRequiredError(error)) {
+      message = t('KANBAN.ACTIONS.DRAG_LOST_REASON_REQUIRED');
+    }
+    if (isDirectWonLostTransitionError(error)) {
+      message = t('KANBAN.ACTIONS.DRAG_DIRECT_WON_LOST_TRANSITION_NOT_ALLOWED');
+    }
+
+    useAlert(message);
     await refreshStageFirstPages([card.kanbanStageId, stage.id]);
   } finally {
     isPersistingCardDrag.value = false;
@@ -909,9 +1029,44 @@ const updateCardPriority = async (card, priorityValue) => {
   }
 };
 
+const onChangeCardStatus = async (
+  card,
+  { targetStageId, reasonId, reopen }
+) => {
+  if (!selectedBoard.value?.id || activeActionKey.value) return;
+
+  activeActionKey.value = `change-status-${card.id}`;
+
+  try {
+    const response = reopen
+      ? await KanbanBoardsAPI.reopenCardById(selectedBoard.value.id, card.id)
+      : await KanbanBoardsAPI.updateCardById(selectedBoard.value.id, card.id, {
+          card: {
+            kanban_stage_id: targetStageId,
+            kanban_reason_id: reasonId || null,
+          },
+        });
+    const updatedCard = normalizePayload(response.data);
+    const nextStageId = updatedCard.kanbanStageId || targetStageId;
+    await refreshStageFirstPages([card.kanbanStageId, nextStageId]);
+    useAlert(
+      t(
+        reopen
+          ? 'KANBAN.CARD.STATUS.REOPEN_SUCCESS'
+          : 'KANBAN.CARD.STATUS.UPDATE_SUCCESS'
+      )
+    );
+  } catch (error) {
+    useAlert(
+      getCardStatusChangeErrorMessage(error, { reopen, t, getErrorMessage })
+    );
+  } finally {
+    activeActionKey.value = '';
+  }
+};
+
 const closeBoardDropdown = () => {
   isBoardDropdownOpen.value = false;
-  closeAddBoardInline();
 };
 
 const selectBoard = boardId => {
@@ -927,19 +1082,13 @@ const selectBoard = boardId => {
   });
 };
 
-const confirmAddBoardInline = () => {
-  const name = newBoardName.value.trim();
-  if (!name || isAddingBoardInlineSubmitting.value) return;
-  submitNewBoard(name);
+const goToCreateBoard = () => {
+  closeBoardDropdown();
+  router.push({
+    name: 'kanban_board_create_form',
+    params: { accountId: route.params.accountId },
+  });
 };
-
-watch(isAddingBoardInline, isOpen => {
-  if (isOpen) {
-    nextTick(() => newBoardNameInput.value?.focus());
-    return;
-  }
-  newBoardName.value = '';
-});
 
 const fetchBoards = async () => {
   hasError.value = false;
@@ -964,7 +1113,7 @@ const fetchBoards = async () => {
     }
 
     if (nextBoardId) {
-      await showBoard(nextBoardId);
+      await showBoardWithSnapshot(nextBoardId);
     }
   } catch {
     hasError.value = true;
@@ -988,15 +1137,18 @@ const removeStageMessageValue = computed(
 
 const getConversationPath = card =>
   frontendURL(
-    conversationUrl({
+    kanbanConversationUrl({
       accountId: route.params.accountId,
-      id: card.conversationId,
+      boardId: selectedBoard.value.id,
+      conversationId: card.conversationId,
     })
   );
 
 const openConversationInNewTab = card => {
   if (!card?.conversationId) return;
 
+  // The board stays mounted in this tab and the new tab gets its own
+  // sessionStorage, so there is no snapshot to save here.
   window.open(
     `${window.chatwootConfig.hostURL}${getConversationPath(card)}`,
     '_blank',
@@ -1012,14 +1164,20 @@ const openConversation = (card, event = {}) => {
     return;
   }
 
-  const path = getConversationPath(card);
-
   if (event.metaKey || event.ctrlKey) {
     openConversationInNewTab(card);
     return;
   }
 
-  router.push({ path });
+  saveBoardSnapshot();
+  pushEmbedded(router, {
+    name: 'kanban_board_conversation',
+    params: {
+      accountId: route.params.accountId,
+      boardId: selectedBoard.value.id,
+      conversationId: card.conversationId,
+    },
+  });
 };
 
 const openDetails = card => {
@@ -1033,6 +1191,37 @@ const openDetails = card => {
 
 const closeOpportunityDetails = () => {
   selectedOpportunityCardId.value = null;
+  showUnsavedOpportunityChangesConfirm.value = false;
+};
+
+const attemptCloseOpportunityDetails = () => {
+  if (opportunityModalRef.value?.hasUnsavedChanges) {
+    showUnsavedOpportunityChangesConfirm.value = true;
+    return;
+  }
+
+  closeOpportunityDetails();
+};
+
+const keepEditingOpportunity = () => {
+  showUnsavedOpportunityChangesConfirm.value = false;
+};
+
+const discardOpportunityChanges = () => {
+  closeOpportunityDetails();
+};
+
+const saveAndCloseOpportunity = async () => {
+  if (isSavingOpportunityBeforeExit.value) return;
+
+  isSavingOpportunityBeforeExit.value = true;
+
+  try {
+    const saved = await opportunityModalRef.value?.saveCard();
+    if (saved) closeOpportunityDetails();
+  } finally {
+    isSavingOpportunityBeforeExit.value = false;
+  }
 };
 
 const onOpportunityUpdated = updatedCard => {
@@ -1044,10 +1233,6 @@ const onOpportunityUpdated = updatedCard => {
       kanbanStageId: updatedCard?.kanbanStageId,
     })
   );
-};
-
-const onOpportunityOpenConversation = card => {
-  openConversationInNewTab(card);
 };
 
 const onOpportunityRemoveCard = card => {
@@ -1064,7 +1249,7 @@ watch(activeBoardId, (boardId, previousBoardId) => {
   }
 
   closeBoardDropdown();
-  showBoard(boardId);
+  showBoardWithSnapshot(boardId);
 });
 
 onMounted(() => {
@@ -1120,60 +1305,15 @@ onUnmounted(() => {
                   />
                 </button>
                 <div class="border-t border-n-weak p-2">
-                  <form
-                    v-if="isAddingBoardInline"
-                    class="flex items-center gap-2"
-                    @submit.prevent="confirmAddBoardInline"
-                  >
-                    <input
-                      ref="newBoardNameInput"
-                      v-model="newBoardName"
-                      type="text"
-                      class="min-w-0 flex-1 rounded-md border border-n-weak bg-n-surface-2 px-2 py-1.5 text-sm text-n-slate-12 outline-none focus:border-n-brand"
-                      :placeholder="t('KANBAN.ACTIONS.BOARD_NAME_PLACEHOLDER')"
-                      data-testid="kanban-add-board-inline-input"
-                      @keydown.escape.prevent="closeAddBoardInline"
-                    />
-                    <button
-                      type="submit"
-                      class="flex size-9 flex-shrink-0 items-center justify-center rounded-md border border-n-weak bg-n-surface-2 text-n-slate-12 disabled:cursor-not-allowed disabled:opacity-50"
-                      :disabled="
-                        !newBoardName.trim() || isAddingBoardInlineSubmitting
-                      "
-                      :aria-label="t('KANBAN.ACTIONS.CONFIRM_CREATE_BOARD')"
-                      :title="t('KANBAN.ACTIONS.CONFIRM_CREATE_BOARD')"
-                      data-testid="kanban-add-board-inline-confirm"
-                    >
-                      <i class="i-lucide-check size-4" />
-                    </button>
-                    <button
-                      type="button"
-                      class="flex size-9 flex-shrink-0 items-center justify-center rounded-md border border-n-weak bg-n-surface-2 text-n-slate-12"
-                      :aria-label="t('KANBAN.ACTIONS.CANCEL_CREATE_BOARD')"
-                      :title="t('KANBAN.ACTIONS.CANCEL_CREATE_BOARD')"
-                      data-testid="kanban-add-board-inline-cancel"
-                      @click="closeAddBoardInline"
-                    >
-                      <i class="i-lucide-x size-4" />
-                    </button>
-                  </form>
                   <button
-                    v-else
                     type="button"
                     class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm font-medium text-n-brand hover:bg-n-alpha-1"
-                    data-testid="kanban-add-board-inline-toggle"
-                    @click="openAddBoardInline"
+                    data-testid="kanban-board-switcher-create-new"
+                    @click="goToCreateBoard"
                   >
                     <i class="i-lucide-plus size-4" />
                     {{ t('KANBAN.OVERVIEW.CREATE_BOARD') }}
                   </button>
-                  <p
-                    v-if="addBoardInlineError"
-                    class="mt-1 px-2 text-xs text-n-ruby-11"
-                    data-testid="kanban-add-board-inline-error"
-                  >
-                    {{ addBoardInlineError }}
-                  </p>
                 </div>
               </div>
             </div>
@@ -1295,6 +1435,7 @@ onUnmounted(() => {
             item-key="id"
             class="flex min-h-0 gap-4"
             handle=".stage-drag-handle"
+            :move="canMoveStage"
             ghost-class="opacity-60"
             chosen-class="opacity-90"
             :animation="180"
@@ -1306,11 +1447,7 @@ onUnmounted(() => {
                 class="flex w-80 flex-shrink-0 flex-col overflow-hidden rounded-lg border border-n-weak bg-n-solid-1"
               >
                 <header
-                  class="stage-drag-handle cursor-grab flex min-h-10 items-center justify-between gap-2 px-3 py-1.5 text-white"
-                  :class="
-                    getStageColorOption(getEffectiveStageColor(stage))
-                      .headerClass
-                  "
+                  class="stage-drag-handle cursor-grab flex min-h-10 items-center justify-between gap-2 border-b border-n-weak px-3 py-2"
                 >
                   <form
                     v-if="editingStageId === stage.id"
@@ -1322,7 +1459,7 @@ onUnmounted(() => {
                         :ref="element => setStageNameInput(stage.id, element)"
                         v-model="stageNames[stage.id]"
                         type="text"
-                        class="min-w-0 flex-1 rounded-md border border-white/30 bg-white/90 px-2 py-1.5 text-sm text-n-slate-12 outline-none focus:border-white"
+                        class="min-w-0 flex-1 rounded-md border border-n-weak bg-n-surface-1 px-2 py-1.5 text-sm text-n-slate-12 outline-none focus:border-n-brand"
                         :placeholder="
                           t('KANBAN.ACTIONS.STAGE_NAME_PLACEHOLDER')
                         "
@@ -1330,7 +1467,7 @@ onUnmounted(() => {
                       />
                       <button
                         type="submit"
-                        class="flex size-8 flex-shrink-0 items-center justify-center rounded-md border border-white/30 bg-white/10 text-white hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-50"
+                        class="flex size-8 flex-shrink-0 items-center justify-center rounded-md border border-n-weak text-n-slate-11 hover:bg-n-alpha-2 disabled:cursor-not-allowed disabled:opacity-50"
                         :disabled="
                           !String(stageNames[stage.id] || '').trim() ||
                           !!activeActionKey
@@ -1342,7 +1479,7 @@ onUnmounted(() => {
                       </button>
                       <button
                         type="button"
-                        class="flex size-8 flex-shrink-0 items-center justify-center rounded-md border border-white/30 bg-white/10 text-white hover:bg-white/20"
+                        class="flex size-8 flex-shrink-0 items-center justify-center rounded-md border border-n-weak text-n-slate-11 hover:bg-n-alpha-2"
                         :aria-label="t('KANBAN.ACTIONS.CANCEL')"
                         :title="t('KANBAN.ACTIONS.CANCEL')"
                         @click="cancelEditingStage"
@@ -1358,12 +1495,12 @@ onUnmounted(() => {
                         v-for="colorOption in stageColorOptions"
                         :key="colorOption.value"
                         type="button"
-                        class="size-5 rounded-full border border-white/40 ring-offset-2"
+                        class="size-5 rounded-full border border-n-weak ring-offset-2"
                         :class="[
                           colorOption.swatchClass,
                           stageColors[stage.id] === colorOption.value
-                            ? 'ring-2 ring-white'
-                            : 'hover:ring-2 hover:ring-white/70',
+                            ? 'ring-2 ring-n-brand'
+                            : 'hover:ring-2 hover:ring-n-slate-6',
                         ]"
                         :aria-label="getSelectStageColorLabel(colorOption)"
                         @click="stageColors[stage.id] = colorOption.value"
@@ -1372,20 +1509,38 @@ onUnmounted(() => {
                   </form>
                   <template v-else>
                     <div class="flex min-w-0 flex-1 items-center gap-2">
-                      <h3 class="truncate text-sm font-medium text-white">
+                      <span
+                        class="size-2.5 flex-shrink-0 rounded-full"
+                        :class="
+                          getStageColorOption(getEffectiveStageColor(stage))
+                            .headerClass
+                        "
+                        aria-hidden="true"
+                      />
+                      <h3
+                        class="truncate text-sm font-semibold text-n-slate-12"
+                      >
                         {{ stage.name }}
                       </h3>
                       <span
-                        class="flex-shrink-0 rounded-full bg-white/20 px-2 py-0.5 text-xs font-medium"
+                        class="flex-shrink-0 rounded-full bg-n-alpha-2 px-2 py-0.5 text-xs font-medium text-n-slate-11"
                       >
                         {{ stage.cardsCount }}
+                      </span>
+                      <span
+                        v-if="stage.totalValue > 0"
+                        data-testid="kanban-stage-total-value"
+                        class="flex-shrink-0 rounded-full bg-n-alpha-2 px-2 py-0.5 text-xs font-medium text-n-slate-11"
+                      >
+                        {{ formatCurrency(stage.totalValue) }}
                       </span>
                     </div>
                     <div class="flex flex-shrink-0 gap-1">
                       <button
+                        v-if="!isTerminalStage(stage)"
                         type="button"
                         data-testid="kanban-add-item-button"
-                        class="flex size-8 items-center justify-center rounded-md border border-white/30 bg-white/10 text-white hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-50"
+                        class="flex size-8 items-center justify-center rounded-md text-n-slate-11 hover:bg-n-alpha-2 disabled:cursor-not-allowed disabled:opacity-50"
                         :disabled="!!activeActionKey"
                         :aria-label="t('KANBAN.ACTIONS.ADD_ITEM')"
                         :title="t('KANBAN.ACTIONS.ADD_ITEM')"
@@ -1396,7 +1551,7 @@ onUnmounted(() => {
                       <div class="relative">
                         <button
                           type="button"
-                          class="flex size-8 items-center justify-center rounded-md border border-white/30 bg-white/10 text-white hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-50"
+                          class="flex size-8 items-center justify-center rounded-md text-n-slate-11 hover:bg-n-alpha-2 disabled:cursor-not-allowed disabled:opacity-50"
                           :disabled="!!activeActionKey"
                           :aria-label="t('KANBAN.ACTIONS.STAGE_OPTIONS')"
                           @click="
@@ -1439,10 +1594,8 @@ onUnmounted(() => {
                 </header>
 
                 <div
+                  :data-stage-scroll-id="stage.id"
                   class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3"
-                  :class="
-                    getKanbanStageBodyColorClass(getEffectiveStageColor(stage))
-                  "
                 >
                   <Draggable
                     :list="stage.cards"
@@ -1480,10 +1633,17 @@ onUnmounted(() => {
                       <KanbanConversationCard
                         :card="card"
                         :active-action-key="activeActionKey"
+                        :won-stage-id="selectedBoard?.wonStageId"
+                        :lost-stage-id="selectedBoard?.lostStageId"
+                        :reasons="selectedBoard?.reasons || []"
+                        :lost-reason-required="
+                          selectedBoard?.lostReasonRequired
+                        "
                         @open-details="openDetails"
                         @open-conversation="openConversation"
                         @remove-card="openRemoveCardConfirmation"
                         @update-priority="updateCardPriority"
+                        @change-status="onChangeCardStatus"
                       />
                     </template>
                   </Draggable>
@@ -1545,17 +1705,55 @@ onUnmounted(() => {
       v-if="selectedOpportunityCardId && selectedBoard"
       :show="!!selectedOpportunityCardId"
       :show-close-button="false"
-      size="modal-big"
-      :on-close="closeOpportunityDetails"
+      size="modal-fit-content"
+      :on-close="attemptCloseOpportunityDetails"
     >
       <KanbanOpportunityDetailsModal
+        ref="opportunityModalRef"
         :board-id="selectedBoard.id"
         :card-id="selectedOpportunityCardId"
-        @close="closeOpportunityDetails"
+        @close="attemptCloseOpportunityDetails"
         @updated="onOpportunityUpdated"
-        @open-conversation="onOpportunityOpenConversation"
+        @open-conversation="openConversation"
         @remove-card="onOpportunityRemoveCard"
       />
+    </woot-modal>
+
+    <woot-modal
+      :show="showUnsavedOpportunityChangesConfirm"
+      :show-close-button="false"
+      size="modal-narrow"
+      :on-close="keepEditingOpportunity"
+    >
+      <div class="p-6">
+        <h2 class="mb-2 text-base font-semibold text-n-slate-12">
+          {{ t('KANBAN.OPPORTUNITY_DETAILS.UNSAVED_CHANGES_TITLE') }}
+        </h2>
+        <p class="mb-6 text-sm text-n-slate-11">
+          {{ t('KANBAN.OPPORTUNITY_DETAILS.UNSAVED_CHANGES_MESSAGE') }}
+        </p>
+        <div class="flex flex-wrap items-center justify-end gap-2">
+          <NextButton
+            outline
+            slate
+            sm
+            :label="t('KANBAN.OPPORTUNITY_DETAILS.KEEP_EDITING')"
+            @click="keepEditingOpportunity"
+          />
+          <NextButton
+            ruby
+            sm
+            :label="t('KANBAN.OPPORTUNITY_DETAILS.DISCARD_CHANGES')"
+            @click="discardOpportunityChanges"
+          />
+          <NextButton
+            sm
+            :is-loading="isSavingOpportunityBeforeExit"
+            :label="t('KANBAN.OPPORTUNITY_DETAILS.SAVE_AND_EXIT')"
+            @click="saveAndCloseOpportunity"
+          />
+        </div>
+      </div>
     </woot-modal>
 
     <woot-modal

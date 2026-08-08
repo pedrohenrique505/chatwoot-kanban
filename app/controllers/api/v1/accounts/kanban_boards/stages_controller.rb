@@ -6,18 +6,12 @@ class Api::V1::Accounts::KanbanBoards::StagesController < Api::V1::Accounts::Bas
   def create
     KanbanStage.transaction do
       KanbanStage.normalize_positions_for_board!(@kanban_board)
-
-      # Always insert new stages at the front; shift only active stages on this board.
-      @kanban_board.kanban_stages.active.ordered.reverse_each do |stage|
-        stage.update!(position: stage.position + 1)
-      end
+      position = KanbanStage.next_active_position(@kanban_board)
+      KanbanStage.shift_active_positions_from!(@kanban_board, position)
 
       @kanban_stage = @kanban_board.kanban_stages.create!(
-        kanban_stage_params.except(:position).merge(account: Current.account, position: 1)
+        kanban_stage_params.except(:position).merge(account: Current.account, position: position)
       )
-
-      KanbanStage.normalize_positions_for_board!(@kanban_board)
-      @kanban_stage.reload
     end
 
     dispatch_kanban_stage_event(Events::Types::KANBAN_STAGE_CREATED)
@@ -29,25 +23,33 @@ class Api::V1::Accounts::KanbanBoards::StagesController < Api::V1::Accounts::Bas
       return
     end
 
-    @kanban_stage.update!(kanban_stage_params)
+    @kanban_stage.update!(kanban_stage_params.except(:position))
     dispatch_kanban_stage_event(Events::Types::KANBAN_STAGE_UPDATED)
   end
 
   def reorder
+    invalid_reorder = false
+
     KanbanStage.transaction do
       KanbanStage.normalize_positions_for_board!(@kanban_board)
       @kanban_stage.reload
+      ordered_stages = @kanban_board.kanban_stages.active.ordered.to_a
+      reordered_stages = reordered_stages_for(ordered_stages)
 
-      if params[:position].present?
-        move_stage_to_position
-      elsif %w[left right].include?(params[:direction])
-        sibling_stage = sibling_stage_for_reorder
-        swap_positions(@kanban_stage, sibling_stage) if sibling_stage
+      if reordered_stages.present? && reordered_stages != ordered_stages
+        unless KanbanStage.valid_special_stage_order?(@kanban_board, reordered_stages)
+          invalid_reorder = true
+          raise ActiveRecord::Rollback
+        end
+
+        KanbanStage.apply_position_order!(reordered_stages)
       end
 
       KanbanStage.normalize_positions_for_board!(@kanban_board)
       @kanban_stage.reload
     end
+
+    return render_invalid_stage_order if invalid_reorder
 
     dispatch_kanban_stage_event(Events::Types::KANBAN_STAGE_REORDERED)
     render :update
@@ -67,7 +69,13 @@ class Api::V1::Accounts::KanbanBoards::StagesController < Api::V1::Accounts::Bas
   private
 
   def fetch_kanban_board
-    @kanban_board = policy_scope(KanbanBoard).find(params[:kanban_board_id])
+    # See KanbanBoardsController#fetch_kanban_board: admins editing a draft board (not yet
+    # activated) need to manage its stages before it becomes active.
+    @kanban_board = if Current.account_user&.administrator?
+                      KanbanBoard.where(account_id: Current.account.id).find(params[:kanban_board_id])
+                    else
+                      policy_scope(KanbanBoard).find(params[:kanban_board_id])
+                    end
   end
 
   def authorize_kanban_board_update
@@ -79,7 +87,7 @@ class Api::V1::Accounts::KanbanBoards::StagesController < Api::V1::Accounts::Bas
   end
 
   def kanban_stage_params
-    params.require(:stage).permit(:name, :position, :active, :color)
+    params.require(:stage).permit(:name, :position, :active, :color, :description)
   end
 
   def deactivating_stage_with_active_cards?
@@ -116,16 +124,26 @@ class Api::V1::Accounts::KanbanBoards::StagesController < Api::V1::Accounts::Bas
     ordered_stages[stage_index + offset] if stage_index && (stage_index + offset).between?(0, ordered_stages.length - 1)
   end
 
-  def swap_positions(stage, sibling_stage)
-    KanbanStage.transaction do
-      stage_position = stage.position
-      stage.update!(position: sibling_stage.position)
-      sibling_stage.update!(position: stage_position)
+  def reordered_stages_for(ordered_stages)
+    if params[:position].present?
+      move_stage_to_position(ordered_stages)
+    elsif %w[left right].include?(params[:direction])
+      sibling_stage = sibling_stage_for_reorder
+      return ordered_stages unless sibling_stage
+
+      swap_positions(ordered_stages, sibling_stage)
     end
   end
 
-  def move_stage_to_position
-    ordered_stages = @kanban_board.kanban_stages.active.ordered.to_a
+  def swap_positions(ordered_stages, sibling_stage)
+    reordered_stages = ordered_stages.dup
+    stage_index = reordered_stages.index(@kanban_stage)
+    sibling_index = reordered_stages.index(sibling_stage)
+    reordered_stages[stage_index], reordered_stages[sibling_index] = reordered_stages[sibling_index], reordered_stages[stage_index]
+    reordered_stages
+  end
+
+  def move_stage_to_position(ordered_stages)
     current_index = ordered_stages.index(@kanban_stage)
     return unless current_index
 
@@ -133,13 +151,13 @@ class Api::V1::Accounts::KanbanBoards::StagesController < Api::V1::Accounts::Bas
     clamped_index = (target_position - 1).clamp(0, ordered_stages.length - 1)
     return if clamped_index == current_index
 
-    ordered_stages.delete_at(current_index)
-    ordered_stages.insert(clamped_index, @kanban_stage)
+    reordered_stages = ordered_stages.dup
+    reordered_stages.delete_at(current_index)
+    reordered_stages.insert(clamped_index, @kanban_stage)
+    reordered_stages
+  end
 
-    ordered_stages.each_with_index do |stage, index|
-      next if stage.position == index + 1
-
-      stage.update!(position: index + 1)
-    end
+  def render_invalid_stage_order
+    render json: { error: KanbanStage::SPECIAL_STAGE_ORDER_ERROR }, status: :unprocessable_content
   end
 end

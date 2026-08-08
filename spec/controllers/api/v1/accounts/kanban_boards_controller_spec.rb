@@ -1025,7 +1025,11 @@ RSpec.describe 'Kanban Boards API', type: :request do
         description: 'Pipeline comercial',
         visibility_mode: 'selected_agents',
         inbox_scope_mode: 'selected_inboxes',
-        auto_create_cards_from_conversations: true
+        auto_create_cards_from_conversations: true,
+        won_recurrence_enabled: true,
+        won_recurrence_window_hours: 12,
+        lost_recurrence_enabled: true,
+        lost_recurrence_window_hours: 48
       )
       inbox = create(:inbox, account: account)
       create(:kanban_board_member, account: account, kanban_board: kanban_board, user: agent)
@@ -1044,7 +1048,11 @@ RSpec.describe 'Kanban Boards API', type: :request do
         'visible_user_ids' => [agent.id],
         'inbox_scope_mode' => 'selected_inboxes',
         'allowed_inbox_ids' => [inbox.id],
-        'auto_create_cards_from_conversations' => true
+        'auto_create_cards_from_conversations' => true,
+        'won_recurrence_enabled' => true,
+        'won_recurrence_window_hours' => 12,
+        'lost_recurrence_enabled' => true,
+        'lost_recurrence_window_hours' => 48
       )
       expect(response.parsed_body).not_to include('visible_users', 'allowed_inboxes')
     end
@@ -1069,7 +1077,11 @@ RSpec.describe 'Kanban Boards API', type: :request do
               kanban_board: {
                 name: 'Vendas',
                 description: 'Pipeline comercial',
-                auto_create_cards_from_conversations: true
+                auto_create_cards_from_conversations: true,
+                won_recurrence_enabled: true,
+                won_recurrence_window_hours: 12,
+                lost_recurrence_enabled: true,
+                lost_recurrence_window_hours: 48
               }
             },
             as: :json
@@ -1078,7 +1090,11 @@ RSpec.describe 'Kanban Boards API', type: :request do
       expect(kanban_board.reload).to have_attributes(
         name: 'Vendas',
         description: 'Pipeline comercial',
-        auto_create_cards_from_conversations: true
+        auto_create_cards_from_conversations: true,
+        won_recurrence_enabled: true,
+        won_recurrence_window_hours: 12,
+        lost_recurrence_enabled: true,
+        lost_recurrence_window_hours: 48
       )
     end
 
@@ -1585,8 +1601,8 @@ RSpec.describe 'Kanban Boards API', type: :request do
 
   def compact_card_keys
     %w[
-      id kanban_stage_id position origin subject active due_at stage_entered_at contact inbox conversation_id priority conversation assignee
-      moved_by_id moved_at card_priority assignees
+      id kanban_stage_id position origin subject active kanban_reason_id products value due_at stage_entered_at contact inbox conversation_id
+      priority conversation assignee moved_by_id moved_at card_priority assignees
     ]
   end
 
