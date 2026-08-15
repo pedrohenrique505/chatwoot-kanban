@@ -128,7 +128,9 @@ Rails.application.routes.draw do
           end
           resources :campaigns, only: [:index, :create, :show, :update, :destroy]
           resources :dashboard_apps, only: [:index, :show, :create, :update, :destroy]
+          get 'products/search', to: 'products#search'
           resources :kanban_boards, only: [:index, :create, :show, :destroy], constraints: { id: /\d+/ } do
+            get :templates, on: :collection
             patch '', on: :member, action: :update
 
             scope module: :kanban_boards do
@@ -137,17 +139,32 @@ Rails.application.routes.draw do
               resources :stages, only: [:create, :destroy] do
                 patch '', on: :member, action: :update
                 patch :reorder, on: :member
+                post :copy, on: :member
+                patch :move, on: :member
+                patch :sort_cards, on: :member, action: :sort, controller: 'stages/cards'
+                patch :move_cards, on: :member, action: :move_all, controller: 'stages/cards'
+                delete :cards, on: :member, action: :destroy_all, controller: 'stages/cards'
                 resources :cards, only: [:index], module: :stages
               end
+              resources :custom_fields, only: [:index, :create, :update, :destroy]
+              get 'cards/lookup', to: 'cards#lookup'
               post 'cards/manual', to: 'cards#create_manual'
               get 'cards/by_id/:id', to: 'cards#show'
+              patch 'cards/by_id/:id/reopen', to: 'cards#reopen'
               patch 'cards/by_id/:id', to: 'cards#update'
               delete 'cards/by_id/:id', to: 'cards#destroy'
               patch 'cards/by_id/:id/reorder', to: 'cards#reorder'
               get 'cards/by_id/:id/labels', to: 'cards/labels#index'
               put 'cards/by_id/:id/labels', to: 'cards/labels#update'
+              get 'cards/by_id/:id/products', to: 'cards/products#index'
+              post 'cards/by_id/:id/products', to: 'cards/products#create'
+              patch 'cards/by_id/:id/products/:product_id', to: 'cards/products#update'
+              delete 'cards/by_id/:id/products/:product_id', to: 'cards/products#destroy'
               get 'cards/by_id/:id/assignees', to: 'cards/assignees#index'
               put 'cards/by_id/:id/assignees', to: 'cards/assignees#update'
+              get 'cards/by_id/:id/field_values', to: 'cards/field_values#index'
+              put 'cards/by_id/:id/field_values', to: 'cards/field_values#update'
+              resources :reasons, only: [:index, :create, :update, :destroy]
             end
           end
           namespace :channels do

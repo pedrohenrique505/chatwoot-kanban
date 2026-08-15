@@ -8,6 +8,7 @@ import { required, url } from '@vuelidate/validators';
 import { useStore } from 'vuex';
 import { useAlert } from 'dashboard/composables';
 import { useAccount } from 'dashboard/composables/useAccount';
+import { translateOrRaw } from 'dashboard/helper/inbox';
 import PageHeader from '../../SettingsSubPageHeader.vue';
 import NextButton from 'dashboard/components-next/button/Button.vue';
 
@@ -25,6 +26,7 @@ const groupsEnabled = ref(false);
 const signingEnabled = ref(false);
 const autoReconnect = ref(true);
 const autoReadReceipts = ref(true);
+const typingSimulationEnabled = ref(true);
 
 const createdInboxId = ref(null);
 const sessionStatus = ref('');
@@ -41,10 +43,11 @@ const isConnected = computed(() => sessionStatus.value === 'WORKING');
 const displayStatus = computed(() => {
   if (!sessionStatus.value)
     return t('INBOX_MGMT.ADD.WAHA_CHANNEL.SESSION.STARTING');
-  const key = `INBOX_MGMT.ADD.WAHA_CHANNEL.SESSION.STATUSES.${sessionStatus.value}`;
-  const translated = t(key);
-  // Fall back to the raw WAHA status for values we don't have a label for
-  return translated === key ? sessionStatus.value : translated;
+  return translateOrRaw(
+    t,
+    `INBOX_MGMT.ADD.WAHA_CHANNEL.SESSION.STATUSES.${sessionStatus.value}`,
+    sessionStatus.value
+  );
 });
 
 const rules = {
@@ -98,6 +101,7 @@ async function createChannel(months) {
         signing_enabled: signingEnabled.value,
         auto_reconnect: autoReconnect.value,
         auto_read_receipts: autoReadReceipts.value,
+        typing_simulation_enabled: typingSimulationEnabled.value,
         import_on_connect_months: months,
       },
     });
@@ -239,6 +243,16 @@ onUnmounted(() => {
         <label class="flex items-center gap-2 cursor-pointer">
           <input v-model="autoReadReceipts" type="checkbox" class="checkbox" />
           {{ $t('INBOX_MGMT.ADD.WAHA_CHANNEL.AUTO_READ_RECEIPTS.LABEL') }}
+        </label>
+        <label class="flex items-center gap-2 cursor-pointer">
+          <input
+            v-model="typingSimulationEnabled"
+            type="checkbox"
+            class="checkbox"
+          />
+          {{
+            $t('INBOX_MGMT.ADD.WAHA_CHANNEL.TYPING_SIMULATION_ENABLED.LABEL')
+          }}
         </label>
       </div>
 

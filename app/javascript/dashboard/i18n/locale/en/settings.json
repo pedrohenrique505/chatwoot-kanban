@@ -259,6 +259,8 @@
     },
     "MEDIA": {
       "IMAGE_UNAVAILABLE": "This image is no longer available.",
+      "AUDIO_UNAVAILABLE": "This audio is no longer available.",
+      "VIDEO_UNAVAILABLE": "This video is no longer available.",
       "LOADING_FAILED": "Loading failed"
     }
   },
@@ -270,6 +272,8 @@
   },
   "SIDEBAR": {
     "NO_ITEMS": "No items",
+    "EXPAND": "Expand sidebar",
+    "COLLAPSE": "Collapse sidebar",
     "CURRENTLY_VIEWING_ACCOUNT": "Currently viewing:",
     "SWITCH": "Switch",
     "INBOX_VIEW": "Inbox View",
@@ -278,6 +282,7 @@
     "KANBAN_OVERVIEW": "Overview",
     "INBOX": "My Inbox",
     "ALL_CONVERSATIONS": "All Conversations",
+    "MY_CONVERSATIONS": "My Conversations",
     "EMAIL_CONVERSATIONS": "Emails",
     "ARCHIVED_CONVERSATIONS": "Archived",
     "MENTIONED_CONVERSATIONS": "Mentions",

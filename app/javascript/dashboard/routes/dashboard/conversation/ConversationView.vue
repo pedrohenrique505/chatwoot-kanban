@@ -1,4 +1,5 @@
 <script>
+import { computed } from 'vue';
 import { mapGetters } from 'vuex';
 import { useWindowSize } from '@vueuse/core';
 import { useUISettings } from 'dashboard/composables/useUISettings';
@@ -13,6 +14,8 @@ import SidepanelSwitch from 'dashboard/components-next/Conversation/SidepanelSwi
 import ConversationSidebar from 'dashboard/components/widgets/conversation/ConversationSidebar.vue';
 import ConversationSearchPanel from 'dashboard/components/widgets/conversation/ConversationSearchPanel.vue';
 import { conversationListPageURL } from 'dashboard/helper/URLHelper';
+import { EMBEDDED_CONVERSATION } from 'dashboard/composables/useEmbeddedConversation';
+import { goBackEmbedded } from 'dashboard/helper/embeddedConversationHistory';
 
 export default {
   components: {
@@ -22,6 +25,19 @@ export default {
     SidepanelSwitch,
     ConversationSidebar,
     ConversationSearchPanel,
+  },
+  provide() {
+    return {
+      [EMBEDDED_CONVERSATION]: computed(() =>
+        this.isEmbedded
+          ? {
+              sidebarOpen: this.embeddedSidebarOpen,
+              setSidebarOpen: this.setEmbeddedSidebarOpen,
+              goBack: this.goBackFromEmbedded,
+            }
+          : null
+      ),
+    };
   },
   beforeRouteLeave(to, from, next) {
     // Clear selected state if navigating away from a conversation to a route without a conversationId to prevent stale data issues
@@ -52,9 +68,17 @@ export default {
       type: String,
       default: '',
     },
+    assigneeType: {
+      type: String,
+      default: wootConstants.ASSIGNEE_TYPE.ALL,
+    },
     foldersId: {
       type: [String, Number],
       default: 0,
+    },
+    backRoute: {
+      type: Object,
+      default: null,
     },
   },
   setup() {
@@ -77,6 +101,7 @@ export default {
       conversationFetchError: false,
       fetchingConversationId: null,
       isSyncingRouteWithArchivedState: false,
+      embeddedSidebarOpen: true,
     };
   },
   computed: {
@@ -89,6 +114,9 @@ export default {
     },
     showMessageView() {
       return this.conversationId ? true : !this.isOnExpandedLayout;
+    },
+    isEmbedded() {
+      return !!this.backRoute;
     },
     isOnExpandedLayout() {
       if (this.windowWidth >= wootConstants.SMALL_SCREEN_BREAKPOINT) {
@@ -109,6 +137,10 @@ export default {
 
       if (this.isConversationSearchOpen) {
         return false;
+      }
+
+      if (this.isEmbedded) {
+        return this.embeddedSidebarOpen;
       }
 
       const { is_contact_sidebar_open: isContactSidebarOpen } = this.uiSettings;
@@ -157,6 +189,13 @@ export default {
     initialize() {
       this.$store.dispatch('setActiveInbox', this.inboxId);
       this.setActiveChat();
+      // In embedded mode (e.g. opened from a kanban card), ChatList isn't
+      // rendered, so its conversation-load event never fires to trigger
+      // this. Check directly so a conversation missing from the store
+      // still gets fetched.
+      if (this.isEmbedded) {
+        this.fetchConversationIfUnavailable();
+      }
     },
     fetchConversationIfUnavailable() {
       if (!this.conversationId) {
@@ -203,7 +242,11 @@ export default {
       return chat;
     },
     syncRouteWithArchivedState(archivedAt) {
-      if (!this.conversationId || this.isSyncingRouteWithArchivedState) {
+      if (
+        this.isEmbedded ||
+        !this.conversationId ||
+        this.isSyncingRouteWithArchivedState
+      ) {
         return;
       }
       // Ignore stale updates while currentChat hasn't caught up with the
@@ -312,6 +355,12 @@ export default {
     onConversationSearchStateChange(searchState) {
       this.$refs.conversationBox?.onConversationSearchStateChange(searchState);
     },
+    setEmbeddedSidebarOpen(value) {
+      this.embeddedSidebarOpen = value;
+    },
+    goBackFromEmbedded() {
+      goBackEmbedded(this.$router, this.backRoute);
+    },
   },
 };
 </script>
@@ -319,11 +368,13 @@ export default {
 <template>
   <section class="flex w-full h-full min-w-0">
     <ChatList
+      v-if="!isEmbedded"
       :show-conversation-list="showConversationList"
       :conversation-inbox="inboxId"
       :label="label"
       :team-id="teamId"
       :conversation-type="conversationType"
+      :assignee-type="assigneeType"
       :folders-id="foldersId"
       :is-on-expanded-layout="isOnExpandedLayout"
       @conversation-load="onConversationLoad"

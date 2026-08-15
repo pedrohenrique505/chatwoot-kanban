@@ -1,7 +1,8 @@
 import { frontendURL } from '../../../helper/URLHelper';
 import KanbanOverview from './KanbanOverview.vue';
 import KanbanView from './KanbanView.vue';
-import KanbanBoardSettings from './KanbanBoardSettings.vue';
+import KanbanBoardForm from './KanbanBoardForm.vue';
+import ConversationView from '../conversation/ConversationView.vue';
 
 const meta = {
   permissions: ['administrator', 'agent'],
@@ -21,9 +22,33 @@ export const routes = [
     meta,
   },
   {
-    path: frontendURL('accounts/:accountId/kanban/:boardId/settings'),
-    name: 'kanban_board_settings',
-    component: KanbanBoardSettings,
+    path: frontendURL(
+      'accounts/:accountId/kanban/:boardId/conversations/:conversationId'
+    ),
+    name: 'kanban_board_conversation',
+    component: ConversationView,
+    meta,
+    props: route => ({
+      conversationId: route.params.conversationId,
+      backRoute: {
+        name: 'kanban_board_show',
+        params: {
+          accountId: route.params.accountId,
+          boardId: route.params.boardId,
+        },
+      },
+    }),
+  },
+  {
+    path: frontendURL('accounts/:accountId/kanban/new'),
+    name: 'kanban_board_create_form',
+    component: KanbanBoardForm,
+    meta,
+  },
+  {
+    path: frontendURL('accounts/:accountId/kanban/:boardId/edit'),
+    name: 'kanban_board_edit_form',
+    component: KanbanBoardForm,
     meta,
   },
 ];

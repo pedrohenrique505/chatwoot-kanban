@@ -4,6 +4,11 @@ import ConversationHeader from './ConversationHeader.vue';
 import DashboardAppFrame from '../DashboardApp/Frame.vue';
 import EmptyState from './EmptyState/EmptyState.vue';
 import MessagesView from './MessagesView.vue';
+import EmbeddedBackButton from './EmbeddedBackButton.vue';
+import {
+  useContactSidebar,
+  useEmbeddedConversation,
+} from 'dashboard/composables/useEmbeddedConversation';
 
 export default {
   components: {
@@ -11,6 +16,7 @@ export default {
     DashboardAppFrame,
     EmptyState,
     MessagesView,
+    EmbeddedBackButton,
   },
   props: {
     inboxId: {
@@ -36,6 +42,14 @@ export default {
     },
   },
   emits: ['conversationSearchOpen', 'conversationSearchClose'],
+  setup() {
+    const { closeSidePanels } = useContactSidebar();
+
+    return {
+      embeddedConversation: useEmbeddedConversation(),
+      closeSidePanels,
+    };
+  },
   data() {
     return {
       activeIndex: 0,
@@ -151,15 +165,6 @@ export default {
         focusedElement.isContentEditable
       );
     },
-    closeSidePanels() {
-      this.$store.dispatch('updateUISettings', {
-        uiSettings: {
-          ...this.uiSettings,
-          is_contact_sidebar_open: false,
-          is_copilot_panel_open: false,
-        },
-      });
-    },
     onContactDetailsToggle(isOpen) {
       if (isOpen) {
         this.closeConversationSearch();
@@ -190,6 +195,12 @@ export default {
       @open-conversation-search="toggleConversationSearch"
       @toggle-contact-details="onContactDetailsToggle"
     />
+    <div
+      v-else-if="embeddedConversation"
+      class="flex min-h-12 items-center border-b border-b-n-weak px-3 py-2"
+    >
+      <EmbeddedBackButton />
+    </div>
     <woot-tabs
       v-if="dashboardApps.length && currentChat.id"
       :index="activeIndex"

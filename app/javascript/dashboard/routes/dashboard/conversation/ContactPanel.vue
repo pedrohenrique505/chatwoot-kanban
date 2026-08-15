@@ -28,6 +28,10 @@ import ShopifyOrdersList from 'dashboard/components/widgets/conversation/Shopify
 import SidebarActionsHeader from 'dashboard/components-next/SidebarActionsHeader.vue';
 import LinearIssuesList from 'dashboard/components/widgets/conversation/linear/IssuesList.vue';
 import LinearSetupCTA from 'dashboard/components/widgets/conversation/linear/LinearSetupCTA.vue';
+import {
+  useContactSidebar,
+  useEmbeddedConversation,
+} from 'dashboard/composables/useEmbeddedConversation';
 
 const props = defineProps({
   conversationId: {
@@ -49,6 +53,16 @@ const {
 
 const dragging = ref(false);
 const conversationSidebarItems = ref([]);
+const embedded = useEmbeddedConversation();
+const { closeSidePanels } = useContactSidebar();
+// Embedded conversations are opened from a kanban board, so the kanban
+// accordion starts expanded without persisting that to the UI settings.
+const isEmbeddedKanbanOpen = ref(true);
+const isKanbanOpen = computed(() =>
+  embedded.value
+    ? isEmbeddedKanbanOpen.value
+    : isContactSidebarItemOpen('is_kanban_open')
+);
 
 const shopifyIntegration = useFunctionGetter(
   'integrations/getIntegration',
@@ -122,11 +136,13 @@ const onDragEnd = () => {
   });
 };
 
-const closeContactPanel = () => {
-  updateUISettings({
-    is_contact_sidebar_open: false,
-    is_copilot_panel_open: false,
-  });
+const toggleKanban = value => {
+  if (embedded.value) {
+    isEmbeddedKanbanOpen.value = value;
+    return;
+  }
+
+  toggleSidebarUIState('is_kanban_open', value);
 };
 
 onMounted(() => {
@@ -144,17 +160,17 @@ onMounted(() => {
   <div class="w-full">
     <SidebarActionsHeader
       :title="$t('CONVERSATION.SIDEBAR.CONTACT')"
-      @close="closeContactPanel"
+      @close="closeSidePanels"
     />
     <ContactInfo :contact="contact" :channel-type="channelType" />
     <div class="px-2 pb-8 list-group flex flex-col gap-3">
       <div class="conversation--actions">
         <AccordionItem
           :title="$t('CONVERSATION_SIDEBAR.ACCORDION.KANBAN')"
-          :is-open="isContactSidebarItemOpen('is_kanban_open')"
+          :is-open="isKanbanOpen"
           compact
           :draggable="false"
-          @toggle="value => toggleSidebarUIState('is_kanban_open', value)"
+          @toggle="toggleKanban"
         >
           <KanbanConversationCards :conversation-id="conversationId" />
         </AccordionItem>

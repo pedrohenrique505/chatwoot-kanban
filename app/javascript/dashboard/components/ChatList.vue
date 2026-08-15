@@ -57,13 +57,20 @@ import {
 } from '../store/modules/conversations/helpers/actionHelpers';
 import { matchesFilters } from '../store/modules/conversations/helpers/filterHelpers';
 import { CONVERSATION_EVENTS } from '../helper/AnalyticsHelper/events';
-import { INBOX_TYPES } from 'dashboard/helper/inbox';
+import {
+  INBOX_TYPES,
+  isInboxVisibleInAllConversations,
+} from 'dashboard/helper/inbox';
 
 const props = defineProps({
   conversationInbox: { type: [String, Number], default: 0 },
   teamId: { type: [String, Number], default: 0 },
   label: { type: String, default: '' },
   conversationType: { type: String, default: '' },
+  assigneeType: {
+    type: String,
+    default: wootConstants.ASSIGNEE_TYPE.ALL,
+  },
   foldersId: { type: [String, Number], default: 0 },
   showConversationList: { default: true, type: Boolean },
   isOnExpandedLayout: { default: false, type: Boolean },
@@ -81,10 +88,10 @@ const isWideScreenOnLoad =
   window.innerWidth >= wootConstants.SMALL_SCREEN_BREAKPOINT;
 
 const listWidth = ref(
-  isWideScreenOnLoad
-    ? CONVERSATION_LIST_MIN_WIDTH
-    : uiSettings.value.conversation_list_width ||
-        CONVERSATION_LIST_DEFAULT_WIDTH
+  uiSettings.value.conversation_list_width ||
+    (isWideScreenOnLoad
+      ? CONVERSATION_LIST_MIN_WIDTH
+      : CONVERSATION_LIST_DEFAULT_WIDTH)
 );
 const isResizingList = ref(false);
 const resizeStartX = ref(0);
@@ -149,6 +156,7 @@ const advancedFilterTypes = ref(
 const currentUser = useMapGetter('getCurrentUser');
 const chatLists = useMapGetter('getFilteredConversations');
 const allChatList = useMapGetter('getAllStatusChats');
+const mineChatList = useMapGetter('getMineChats');
 const chatListLoading = useMapGetter('getChatListLoadingStatus');
 const activeInbox = useMapGetter('getSelectedInbox');
 const conversationStats = useMapGetter('conversationStats/getStats');
@@ -267,15 +275,16 @@ const currentUserDetails = computed(() => {
 });
 
 const currentPageFilterKey = computed(() => {
-  return hasAppliedFiltersOrActiveFolders.value
-    ? 'appliedFilters'
-    : wootConstants.ASSIGNEE_TYPE.ALL;
+  if (hasAppliedFiltersOrActiveFolders.value) {
+    return 'appliedFilters';
+  }
+  return props.assigneeType;
 });
 
 const inbox = useFunctionGetter('inboxes/getInbox', activeInbox);
 const currentPage = useFunctionGetter(
   'conversationPage/getCurrentPageFilter',
-  computed(() => wootConstants.ASSIGNEE_TYPE.ALL)
+  computed(() => props.assigneeType)
 );
 const currentFiltersPage = useFunctionGetter(
   'conversationPage/getCurrentPageFilter',
@@ -291,9 +300,16 @@ const conversationCustomAttributes = useFunctionGetter(
   'conversation_attribute'
 );
 
+const conversationCount = computed(() => {
+  if (props.assigneeType === wootConstants.ASSIGNEE_TYPE.ME) {
+    return conversationStats.value.mineCount || 0;
+  }
+  return conversationStats.value.allCount || 0;
+});
+
 const conversationListPagination = computed(() => {
   const conversationsPerPage = 25;
-  const allCount = conversationStats.value.allCount || 0;
+  const conversationCountForPage = conversationCount.value;
   const hasChatsOnView =
     chatsOnView.value &&
     Array.isArray(chatsOnView.value) &&
@@ -302,8 +318,8 @@ const conversationListPagination = computed(() => {
     !hasAppliedFiltersOrActiveFolders.value && hasChatsOnView;
   const isUnderPerPage =
     chatsOnView.value.length < conversationsPerPage &&
-    allCount < conversationsPerPage &&
-    allCount > chatsOnView.value.length;
+    conversationCountForPage < conversationsPerPage &&
+    conversationCountForPage > chatsOnView.value.length;
 
   if (isNoFiltersOrFoldersAndChatListNotEmpty && isUnderPerPage) {
     return 1;
@@ -312,13 +328,14 @@ const conversationListPagination = computed(() => {
   return currentPage.value + 1;
 });
 
+// Every other conversation route sets one of these props, so their absence is
+// what identifies the all-conversations view — including while a conversation
+// is open, which the list stays mounted for.
 const isAllConversationsView = computed(() => {
   return (
-    route.name === 'home' &&
-    currentPageFilterKey.value === wootConstants.ASSIGNEE_TYPE.ALL &&
+    props.assigneeType === wootConstants.ASSIGNEE_TYPE.ALL &&
     !hasAppliedFiltersOrActiveFolders.value &&
     !isSearching.value &&
-    !searchQuery.value &&
     !props.conversationInbox &&
     !props.teamId &&
     !props.label &&
@@ -330,7 +347,7 @@ const isAllConversationsView = computed(() => {
 const visibleInAllConversationInboxIds = computed(() => {
   return new Set(
     inboxesList.value
-      .filter(inboxItem => inboxItem.show_in_all_conversations !== false)
+      .filter(isInboxVisibleInAllConversations)
       .map(inboxItem => Number(inboxItem.id))
   );
 });
@@ -352,7 +369,7 @@ const emailInboxIds = computed(() => {
 const conversationFilters = computed(() => {
   return {
     inboxId: props.conversationInbox ? props.conversationInbox : undefined,
-    assigneeType: wootConstants.ASSIGNEE_TYPE.ALL,
+    assigneeType: props.assigneeType,
     status: activeStatus.value,
     sortBy: activeSortBy.value,
     page: conversationListPagination.value,
@@ -384,6 +401,9 @@ const pageTitle = computed(() => {
   if (props.label) {
     return `#${props.label}`;
   }
+  if (props.assigneeType === wootConstants.ASSIGNEE_TYPE.ME) {
+    return t('SIDEBAR.MY_CONVERSATIONS');
+  }
   if (props.conversationType === wootConstants.CONVERSATION_TYPE.MENTION) {
     return t('CHAT_LIST.MENTION_HEADING');
   }
@@ -407,7 +427,11 @@ const conversationList = computed(() => {
 
   if (!hasAppliedFiltersOrActiveFolders.value) {
     const filters = conversationFilters.value;
-    localConversationList = [...allChatList.value(filters)];
+    const conversationGetter =
+      props.assigneeType === wootConstants.ASSIGNEE_TYPE.ME
+        ? mineChatList
+        : allChatList;
+    localConversationList = [...conversationGetter.value(filters)];
   } else {
     localConversationList = [...chatLists.value];
   }
@@ -564,7 +588,7 @@ function initializeExistingFilterToModal() {
   const statusFilter = initializeStatusAndAssigneeFilterToModal(
     activeStatus.value,
     currentUserDetails.value,
-    wootConstants.ASSIGNEE_TYPE.ALL
+    props.assigneeType
   );
   // TODO: Remove the usage of useCamelCase after migrating useFilter to camelcase
   if (statusFilter) {
@@ -725,6 +749,7 @@ function redirectToConversationList() {
       inboxId,
       label,
       teamId,
+      assigneeType: props.assigneeType,
     })
   );
 }
@@ -950,6 +975,10 @@ watch(
   computed(() => props.conversationType),
   () => resetAndFetchData()
 );
+watch(
+  computed(() => props.assigneeType),
+  () => resetAndFetchData()
+);
 
 watch(activeFolder, (newVal, oldVal) => {
   if (newVal !== oldVal) {
@@ -1061,6 +1090,7 @@ watch(conversationFilters, (newVal, oldVal) => {
       :team-id="teamId"
       :folders-id="foldersId"
       :conversation-type="conversationType"
+      :assignee-type="assigneeType"
       :is-on-expanded-layout="isOnExpandedLayout"
       @load-more="loadMoreConversations"
     />

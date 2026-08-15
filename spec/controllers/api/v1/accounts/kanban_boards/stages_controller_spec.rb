@@ -7,7 +7,7 @@ RSpec.describe 'Kanban Stages API', type: :request do
   let(:kanban_board) { create(:kanban_board, account: account) }
 
   describe 'POST /api/v1/accounts/{account.id}/kanban_boards/{kanban_board.id}/stages' do
-    let(:payload) { { stage: { name: 'Proposal', position: 1, color: 'teal' } } }
+    let(:payload) { { stage: { name: 'Proposal', position: 1, color: '#12A594' } } }
 
     it 'creates a stage for administrators' do
       expect do
@@ -19,8 +19,19 @@ RSpec.describe 'Kanban Stages API', type: :request do
 
       expect(response).to have_http_status(:success)
       expect(response.parsed_body['name']).to eq('Proposal')
-      expect(response.parsed_body['color']).to eq('teal')
+      expect(response.parsed_body['color']).to eq('#12A594')
       expect(response.parsed_body['position']).to eq(1)
+    end
+
+    it 'rejects named stage colors' do
+      expect do
+        post "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}/stages",
+             headers: administrator.create_new_auth_token,
+             params: { stage: { name: 'Proposal', position: 1, color: 'teal' } },
+             as: :json
+      end.not_to change(KanbanStage, :count)
+
+      expect(response).to have_http_status(:unprocessable_content)
     end
 
     it 'emits kanban.stage.created with a compact payload' do
@@ -57,19 +68,35 @@ RSpec.describe 'Kanban Stages API', type: :request do
       )
     end
 
-    it 'inserts the new stage at the beginning and shifts existing active stages' do
+    it 'appends the new stage after the existing active stages' do
       first_stage = create(:kanban_stage, account: account, kanban_board: kanban_board, name: 'First', position: 1)
       second_stage = create(:kanban_stage, account: account, kanban_board: kanban_board, name: 'Second', position: 2)
 
       post "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}/stages",
            headers: administrator.create_new_auth_token,
-           params: { stage: { name: 'Proposal', position: 99, color: 'teal' } },
+           params: { stage: { name: 'Proposal', position: 99, color: '#12A594' } },
+           as: :json
+
+      expect(response).to have_http_status(:success)
+      expect(response.parsed_body['position']).to eq(3)
+      expect(first_stage.reload.position).to eq(1)
+      expect(second_stage.reload.position).to eq(2)
+    end
+
+    it 'inserts the new stage before the won and lost stages' do
+      won_stage = create(:kanban_stage, account: account, kanban_board: kanban_board, name: 'Won', position: 1)
+      lost_stage = create(:kanban_stage, account: account, kanban_board: kanban_board, name: 'Lost', position: 2)
+      kanban_board.update!(won_stage: won_stage, lost_stage: lost_stage)
+
+      post "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}/stages",
+           headers: administrator.create_new_auth_token,
+           params: { stage: { name: 'Proposal', color: '#12A594' } },
            as: :json
 
       expect(response).to have_http_status(:success)
       expect(response.parsed_body['position']).to eq(1)
-      expect(first_stage.reload.position).to eq(2)
-      expect(second_stage.reload.position).to eq(3)
+      expect(won_stage.reload.position).to eq(2)
+      expect(lost_stage.reload.position).to eq(3)
     end
 
     it 'does not shift inactive stages or stages from other boards' do
@@ -93,11 +120,11 @@ RSpec.describe 'Kanban Stages API', type: :request do
 
       post "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}/stages",
            headers: administrator.create_new_auth_token,
-           params: { stage: { name: 'Proposal', position: 99, color: 'teal' } },
+           params: { stage: { name: 'Proposal', position: 99, color: '#12A594' } },
            as: :json
 
       expect(response).to have_http_status(:success)
-      expect(first_stage.reload.position).to eq(2)
+      expect(first_stage.reload.position).to eq(1)
       expect(inactive_stage.reload.position).to eq(5)
       expect(other_board_stage.reload.position).to eq(5)
     end
@@ -118,13 +145,43 @@ RSpec.describe 'Kanban Stages API', type: :request do
 
       patch "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}/stages/#{stage.id}",
             headers: administrator.create_new_auth_token,
-            params: { stage: { name: 'Won', active: false, color: 'ruby' } },
+            params: { stage: { name: 'Won', active: false, color: '#E54666' } },
             as: :json
 
       expect(response).to have_http_status(:success)
       expect(stage.reload.name).to eq('Won')
-      expect(stage.color).to eq('ruby')
+      expect(stage.color).to eq('#E54666')
       expect(stage).not_to be_active
+    end
+
+    it 'keeps terminal colors canonical when updating a terminal stage' do
+      won_stage = create(:kanban_stage, account: account, kanban_board: kanban_board, name: 'Won', color: '#8B8D98', position: 1)
+      lost_stage = create(:kanban_stage, account: account, kanban_board: kanban_board, name: 'Lost', color: '#8B8D98', position: 2)
+      kanban_board.update!(won_stage: won_stage, lost_stage: lost_stage)
+
+      patch "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}/stages/#{won_stage.id}",
+            headers: administrator.create_new_auth_token,
+            params: { stage: { name: 'Closed Won', color: '#123456' } },
+            as: :json
+
+      expect(response).to have_http_status(:success)
+      expect(won_stage.reload.color).to eq(KanbanBoards::TemplateCatalog::WON_COLOR)
+    end
+
+    it 'does not deactivate a special stage through an update' do
+      won_stage = create(:kanban_stage, account: account, kanban_board: kanban_board, name: 'Won', position: 1)
+      lost_stage = create(:kanban_stage, account: account, kanban_board: kanban_board, name: 'Lost', position: 2)
+      kanban_board.update!(won_stage: won_stage, lost_stage: lost_stage)
+
+      patch "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}/stages/#{won_stage.id}",
+            headers: administrator.create_new_auth_token,
+            params: { stage: { active: false } },
+            as: :json
+
+      expect(response).to have_http_status(:unprocessable_content)
+      expect(response.parsed_body['error']).to eq('special_stage_cannot_be_deleted')
+      expect(won_stage.reload).to be_active
+      expect(kanban_board.reload.won_stage_id).to eq(won_stage.id)
     end
 
     it 'emits kanban.stage.updated with a compact payload' do
@@ -389,6 +446,20 @@ RSpec.describe 'Kanban Stages API', type: :request do
 
       expect(response).to have_http_status(:no_content)
       expect(stage.reload).not_to be_active
+    end
+
+    it 'does not deactivate a special stage' do
+      won_stage = create(:kanban_stage, account: account, kanban_board: kanban_board, name: 'Won', position: 1)
+      lost_stage = create(:kanban_stage, account: account, kanban_board: kanban_board, name: 'Lost', position: 2)
+      kanban_board.update!(won_stage: won_stage, lost_stage: lost_stage)
+
+      delete "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}/stages/#{won_stage.id}",
+             headers: administrator.create_new_auth_token,
+             as: :json
+
+      expect(response).to have_http_status(:unprocessable_content)
+      expect(response.parsed_body['error']).to eq('special_stage_cannot_be_deleted')
+      expect(won_stage.reload).to be_active
     end
 
     it 'emits kanban.stage.deleted with a compact payload' do

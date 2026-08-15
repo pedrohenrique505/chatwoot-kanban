@@ -1,6 +1,9 @@
 class KanbanCards::AutoCreateFromConversationService
-  def initialize(conversation)
+  def initialize(conversation, kanban_board: nil, inbox: nil, recreated_from_card_id: nil)
     @conversation = conversation
+    @kanban_board = kanban_board
+    @provided_inbox = inbox
+    @recreated_from_card_id = recreated_from_card_id
     @summary = summary_hash
   end
 
@@ -16,12 +19,13 @@ class KanbanCards::AutoCreateFromConversationService
 
   private
 
-  attr_reader :conversation, :summary
+  attr_reader :conversation, :kanban_board, :provided_inbox, :recreated_from_card_id, :summary
 
   def eligible_boards
-    KanbanBoard.active
-               .where(account_id: conversation.account_id, auto_create_cards_from_conversations: true)
-               .accepting_inbox(conversation.inbox_id)
+    scope = KanbanBoard.accepting_inbox_for_account(conversation.account_id, inbox.id)
+    return scope.where(id: kanban_board.id) if kanban_board.present?
+
+    scope.where(auto_create_cards_from_conversations: true).where.not(id: boards_with_terminal_history_ids)
   end
 
   def create_for_board(kanban_board)
@@ -68,7 +72,8 @@ class KanbanCards::AutoCreateFromConversationService
       subject: default_subject,
       origin: 'conversation',
       position: 1,
-      active: true
+      active: true,
+      recreated_from_card_id: recreated_from_card_id
     )
   end
 
@@ -95,7 +100,28 @@ class KanbanCards::AutoCreateFromConversationService
   end
 
   def automatic_card_exists?(kanban_board)
-    KanbanCard.conversation.exists?(kanban_board: kanban_board, conversation_id: conversation.id)
+    return KanbanCard.conversation.exists?(kanban_board: kanban_board, conversation_id: conversation.id) if recreated_from_card_id.blank?
+
+    KanbanCard.active_non_terminal_for(kanban_board, contact.id).exists?
+  end
+
+  def boards_with_terminal_history_ids
+    latest_terminal_cards_per_board.select do |row|
+      (row.kanban_stage_id == row.won_stage_id && row.won_recurrence_enabled) ||
+        (row.kanban_stage_id == row.lost_stage_id && row.lost_recurrence_enabled)
+    end.map(&:kanban_board_id)
+  end
+
+  def latest_terminal_cards_per_board
+    KanbanCard.joins(:kanban_board)
+              .where(kanban_cards: { account_id: conversation.account_id, contact_id: contact.id })
+              .where('kanban_cards.kanban_stage_id IN (kanban_boards.won_stage_id, kanban_boards.lost_stage_id)')
+              .select(
+                'DISTINCT ON (kanban_cards.kanban_board_id) kanban_cards.kanban_board_id, ' \
+                'kanban_cards.kanban_stage_id, kanban_boards.won_stage_id, kanban_boards.won_recurrence_enabled, ' \
+                'kanban_boards.lost_stage_id, kanban_boards.lost_recurrence_enabled'
+              )
+              .order('kanban_cards.kanban_board_id, kanban_cards.stage_entered_at DESC, kanban_cards.id DESC')
   end
 
   def default_subject
@@ -115,7 +141,7 @@ class KanbanCards::AutoCreateFromConversationService
   end
 
   def inbox
-    @inbox ||= conversation.inbox
+    @inbox ||= provided_inbox || conversation.inbox
   end
 
   def skip_existing_card

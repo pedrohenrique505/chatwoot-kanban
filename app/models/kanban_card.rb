@@ -12,6 +12,7 @@
 #  origin             :string           not null
 #  position           :integer          default(0), not null
 #  priority           :integer
+#  recreated_from_card_id :bigint
 #  stage_entered_at   :datetime         not null
 #  starts_at          :datetime
 #  subject            :string
@@ -22,7 +23,9 @@
 #  conversation_id    :bigint
 #  inbox_id           :bigint           not null
 #  kanban_board_id    :bigint           not null
+#  kanban_reason_id   :bigint
 #  kanban_stage_id    :bigint           not null
+#  previous_stage_id  :bigint
 #
 # Indexes
 #
@@ -35,6 +38,9 @@
 #  index_kanban_cards_on_conversation_id              (conversation_id)
 #  index_kanban_cards_on_conversation_subject_unique  (kanban_board_id,conversation_id,inbox_id,normalized_subject) UNIQUE WHERE (((origin)::text = 'conversation'::text) AND (conversation_id IS NOT NULL) AND (normalized_subject IS NOT NULL))
 #  index_kanban_cards_on_kanban_board_id_and_active   (kanban_board_id,active)
+#  index_kanban_cards_on_kanban_reason_id             (kanban_reason_id)
+#  index_kanban_cards_on_previous_stage_id            (previous_stage_id)
+#  index_kanban_cards_on_recreated_from_card_id       (recreated_from_card_id)
 #
 # rubocop:enable Layout/LineLength
 class KanbanCard < ApplicationRecord
@@ -43,12 +49,17 @@ class KanbanCard < ApplicationRecord
   belongs_to :account
   belongs_to :kanban_board
   belongs_to :kanban_stage
+  belongs_to :previous_stage, class_name: 'KanbanStage', optional: true, inverse_of: false
   belongs_to :contact
   belongs_to :inbox
   belongs_to :conversation, optional: true
+  belongs_to :kanban_reason, optional: true
+  belongs_to :recreated_from_card, class_name: 'KanbanCard', optional: true, inverse_of: false
 
   has_many :kanban_card_assignees, dependent: :destroy
   has_many :assignees, through: :kanban_card_assignees, source: :user
+  has_many :kanban_card_products, dependent: :destroy
+  has_many :kanban_card_field_values, dependent: :destroy
 
   enum :origin, {
     conversation: 'conversation',
@@ -56,6 +67,11 @@ class KanbanCard < ApplicationRecord
   }
 
   enum :priority, { low: 0, medium: 1, high: 2, urgent: 3 }
+  SORT_ORDER_SQL = {
+    'created_at_desc' => 'kanban_cards.created_at DESC, kanban_cards.id DESC',
+    'created_at_asc' => 'kanban_cards.created_at ASC, kanban_cards.id ASC',
+    'name_asc' => "COALESCE(NULLIF(kanban_cards.subject, ''), contacts.name) ASC NULLS LAST, kanban_cards.id ASC"
+  }.freeze
 
   before_validation :normalize_subject
   before_validation :normalize_blank_description
@@ -84,6 +100,14 @@ class KanbanCard < ApplicationRecord
 
   scope :active, -> { where(active: true) }
   scope :ordered, -> { order(position: :asc, created_at: :asc, id: :asc) }
+  scope :active_non_terminal_for, lambda { |kanban_board, contact_id|
+    active.where(kanban_board: kanban_board, contact_id: contact_id)
+          .where.not(kanban_stage_id: KanbanStage.special_stage_ids(kanban_board))
+  }
+
+  def total_value
+    kanban_card_products.sum { |product| product.unit_price * product.quantity }
+  end
 
   def self.normalize_positions_for_stage!(kanban_board:, kanban_stage:)
     transaction do
@@ -169,7 +193,72 @@ class KanbanCard < ApplicationRecord
     SQL
   end
 
-  private_class_method :bulk_normalize_positions_for_stage!
+  def self.sort_active_cards_for_stage!(kanban_board:, kanban_stage:, sort_by:)
+    transaction do
+      lock_reorder_stages!([kanban_stage.id])
+      lock_active_cards_for_stages!(kanban_board, [kanban_stage.id])
+      bulk_sort_active_cards_for_stage!(kanban_board, kanban_stage, sort_by)
+    end
+  end
+
+  def self.move_active_cards_to_stage!(kanban_board:, source_stage:, target_stage:)
+    transaction do
+      stage_ids = [source_stage.id, target_stage.id].sort
+      lock_reorder_stages!(stage_ids)
+      lock_active_cards_for_stages!(kanban_board, stage_ids)
+
+      bulk_normalize_positions_for_stage!(kanban_board, target_stage)
+      target_card_count = stage_active_cards(kanban_board, target_stage).count
+      bulk_move_active_cards!(kanban_board, source_stage, target_stage, target_card_count)
+      bulk_normalize_positions_for_stage!(kanban_board, source_stage)
+    end
+  end
+
+  def self.bulk_sort_active_cards_for_stage!(kanban_board, kanban_stage, sort_by)
+    order_sql = SORT_ORDER_SQL.fetch(sort_by)
+
+    connection.execute(<<~SQL.squish)
+      WITH ordered_cards AS (
+        SELECT kanban_cards.id, row_number() OVER (ORDER BY #{order_sql}) AS sorted_position
+        FROM #{quoted_table_name}
+        LEFT JOIN #{Contact.quoted_table_name} ON #{Contact.quoted_table_name}.id = #{quoted_table_name}.contact_id
+        WHERE #{quoted_table_name}.kanban_board_id = #{connection.quote(kanban_board.id)}
+          AND #{quoted_table_name}.kanban_stage_id = #{connection.quote(kanban_stage.id)}
+          AND #{quoted_table_name}.active = TRUE
+      )
+      UPDATE #{quoted_table_name}
+      SET position = ordered_cards.sorted_position,
+          updated_at = #{connection.quote(Time.current)}
+      FROM ordered_cards
+      WHERE #{quoted_table_name}.id = ordered_cards.id
+        AND #{quoted_table_name}.position != ordered_cards.sorted_position
+    SQL
+  end
+
+  def self.bulk_move_active_cards!(kanban_board, source_stage, target_stage, target_card_count)
+    current_time = connection.quote(Time.current)
+
+    connection.execute(<<~SQL.squish)
+      WITH source_cards AS (
+        SELECT id, row_number() OVER (ORDER BY position ASC, created_at ASC, id ASC) + #{target_card_count} AS target_position
+        FROM #{quoted_table_name}
+        WHERE kanban_board_id = #{connection.quote(kanban_board.id)}
+          AND kanban_stage_id = #{connection.quote(source_stage.id)}
+          AND active = TRUE
+      )
+      UPDATE #{quoted_table_name}
+      SET kanban_stage_id = #{connection.quote(target_stage.id)},
+          position = source_cards.target_position,
+          kanban_reason_id = NULL,
+          previous_stage_id = NULL,
+          stage_entered_at = #{current_time},
+          updated_at = #{current_time}
+      FROM source_cards
+      WHERE #{quoted_table_name}.id = source_cards.id
+    SQL
+  end
+
+  private_class_method :bulk_normalize_positions_for_stage!, :bulk_sort_active_cards_for_stage!, :bulk_move_active_cards!
 
   private
 
@@ -247,7 +336,7 @@ class KanbanCard < ApplicationRecord
 
     normalized_display_subject = subject.to_s.strip.gsub(/\s+/, ' ')
     self.subject = normalized_display_subject.presence
-    self.normalized_subject = normalized_display_subject.presence&.downcase
+    self.normalized_subject = normalized_display_subject.presence&.downcase if recreated_from_card_id.blank?
   end
 
   def normalize_blank_description
@@ -282,7 +371,10 @@ class KanbanCard < ApplicationRecord
     validate_account_for(:contact)
     validate_account_for(:inbox)
     validate_account_for(:conversation)
+    validate_account_for(:kanban_reason)
+    validate_account_for(:recreated_from_card)
     validate_board_for_stage
+    validate_board_for_reason
     validate_conversation_contact
     validate_conversation_inbox
   end
@@ -298,6 +390,12 @@ class KanbanCard < ApplicationRecord
     return if kanban_stage.blank? || kanban_board.blank? || kanban_stage.kanban_board_id == kanban_board_id
 
     errors.add(:kanban_stage, :invalid)
+  end
+
+  def validate_board_for_reason
+    return if kanban_reason.blank? || kanban_board.blank? || kanban_reason.kanban_board_id == kanban_board_id
+
+    errors.add(:kanban_reason, :invalid)
   end
 
   def validate_conversation_contact

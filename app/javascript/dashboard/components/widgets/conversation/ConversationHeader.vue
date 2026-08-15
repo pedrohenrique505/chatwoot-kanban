@@ -4,18 +4,27 @@ import { useRoute } from 'vue-router';
 import { useStore } from 'vuex';
 import { useElementSize } from '@vueuse/core';
 import BackButton from '../BackButton.vue';
+import EmbeddedBackButton from './EmbeddedBackButton.vue';
 import InboxName from '../InboxName.vue';
 import MoreActions from './MoreActions.vue';
 import Avatar from 'next/avatar/Avatar.vue';
 import SLACardLabel from './components/SLACardLabel.vue';
 import ConversationCallButton from './ConversationCallButton.vue';
 import NextButton from 'dashboard/components-next/button/Button.vue';
+import MultiselectDropdown from 'shared/components/ui/MultiselectDropdown.vue';
+import ConversationLabels from 'dashboard/routes/dashboard/conversation/labels/LabelBox.vue';
 import wootConstants from 'dashboard/constants/globals';
 import { conversationListPageURL } from 'dashboard/helper/URLHelper';
 import { snoozedReopenTime } from 'dashboard/helper/snoozeHelpers';
 import { useInbox } from 'dashboard/composables/useInbox';
-import { useUISettings } from 'dashboard/composables/useUISettings';
 import { useI18n } from 'vue-i18n';
+import {
+  useContactSidebar,
+  useEmbeddedConversation,
+} from 'dashboard/composables/useEmbeddedConversation';
+import { useAgentsList } from 'dashboard/composables/useAgentsList';
+
+import { useAlert } from 'dashboard/composables';
 
 const props = defineProps({
   chat: {
@@ -35,13 +44,50 @@ const route = useRoute();
 const conversationHeader = ref(null);
 const { width } = useElementSize(conversationHeader);
 const { isAWebWidgetInbox } = useInbox();
-const { uiSettings, updateUISettings } = useUISettings();
+const embedded = useEmbeddedConversation();
+const { toggleContactSidebar } = useContactSidebar();
 const headerSeparator = '\u2022';
 
 const currentChat = computed(() => store.getters.getSelectedChat);
 const accountId = computed(() => store.getters.getCurrentAccountId);
 
 const chatMetadata = computed(() => props.chat.meta);
+const { agentsList } = useAgentsList();
+const assignedAgent = computed(() => currentChat.value?.meta?.assignee || null);
+const assignedTeam = computed(() => currentChat.value?.meta?.team || null);
+const teamsList = computed(() => {
+  const teams = store.getters['teams/getTeams'];
+
+  if (assignedTeam.value) {
+    return [{ id: 0, name: t('TEAMS_SETTINGS.LIST.NONE') }, ...teams];
+  }
+
+  return teams;
+});
+
+async function onAssignCurrentAgent(agent) {
+  const assignee = assignedAgent.value?.id === agent.id ? null : agent;
+  const conversationId = currentChat.value.id;
+
+  store.dispatch('setCurrentChatAssignee', { conversationId, assignee });
+  await store.dispatch('assignAgent', {
+    conversationId,
+    agentId: assignee ? assignee.id : null,
+  });
+  useAlert(t('CONVERSATION.CHANGE_AGENT'));
+}
+
+async function onAssignCurrentTeam(team) {
+  const assigned = assignedTeam.value?.id === team.id ? null : team;
+  const conversationId = currentChat.value.id;
+
+  store.dispatch('setCurrentChatTeam', { conversationId, team: assigned });
+  await store.dispatch('assignTeam', {
+    conversationId,
+    teamId: assigned ? assigned.id : 0,
+  });
+  useAlert(t('CONVERSATION.CHANGE_TEAM'));
+}
 
 const backButtonUrl = computed(() => {
   const {
@@ -53,12 +99,16 @@ const backButtonUrl = computed(() => {
     conversation_through_mentions: 'mention',
     conversation_through_unattended: 'unattended',
   };
+  const assigneeTypeMap = {
+    conversation_through_mine: wootConstants.ASSIGNEE_TYPE.ME,
+  };
   return conversationListPageURL({
     accountId: accountId.value,
     inboxId,
     label,
     teamId,
     conversationType: conversationTypeMap[name],
+    assigneeType: assigneeTypeMap[name],
     customViewId,
   });
 });
@@ -94,17 +144,7 @@ const inbox = computed(() => {
 const hasSlaPolicyId = computed(() => props.chat?.sla_policy_id);
 
 const toggleContactDetails = () => {
-  const shouldOpenContactDetails = !uiSettings.value.is_contact_sidebar_open;
-  const nextUISettings = {
-    is_contact_sidebar_open: shouldOpenContactDetails,
-  };
-
-  if (shouldOpenContactDetails) {
-    nextUISettings.is_copilot_panel_open = false;
-  }
-
-  updateUISettings(nextUISettings);
-  emit('toggleContactDetails', shouldOpenContactDetails);
+  emit('toggleContactDetails', toggleContactSidebar());
 };
 </script>
 
@@ -114,8 +154,9 @@ const toggleContactDetails = () => {
     class="flex flex-row items-center justify-between flex-1 w-full min-w-0 gap-3 px-3 py-2 min-h-12"
   >
     <div class="flex items-center justify-start flex-1 min-w-0">
+      <EmbeddedBackButton v-if="embedded" class="ltr:mr-2 rtl:ml-2" />
       <BackButton
-        v-if="showBackButton"
+        v-else-if="showBackButton"
         :back-url="backButtonUrl"
         icon-only
         class="ltr:mr-2 rtl:ml-2"
@@ -194,6 +235,37 @@ const toggleContactDetails = () => {
         data-testid="conversation-header-search-button"
         @click.stop="emit('openConversationSearch')"
       />
+      <MultiselectDropdown
+        compact
+        compact-icon="i-lucide-user-round-check"
+        :options="agentsList"
+        :selected-item="assignedAgent"
+        :multiselector-title="$t('AGENT_MGMT.MULTI_SELECTOR.TITLE.AGENT')"
+        :multiselector-placeholder="$t('AGENT_MGMT.MULTI_SELECTOR.PLACEHOLDER')"
+        :no-search-result="
+          $t('AGENT_MGMT.MULTI_SELECTOR.SEARCH.NO_RESULTS.AGENT')
+        "
+        :input-placeholder="
+          $t('AGENT_MGMT.MULTI_SELECTOR.SEARCH.PLACEHOLDER.AGENT')
+        "
+        @select="onAssignCurrentAgent"
+      />
+      <MultiselectDropdown
+        compact
+        compact-icon="i-lucide-users-round"
+        :options="teamsList"
+        :selected-item="assignedTeam"
+        :multiselector-title="$t('AGENT_MGMT.MULTI_SELECTOR.TITLE.TEAM')"
+        :multiselector-placeholder="$t('AGENT_MGMT.MULTI_SELECTOR.PLACEHOLDER')"
+        :no-search-result="
+          $t('AGENT_MGMT.MULTI_SELECTOR.SEARCH.NO_RESULTS.TEAM')
+        "
+        :input-placeholder="
+          $t('AGENT_MGMT.MULTI_SELECTOR.SEARCH.PLACEHOLDER.TEAM')
+        "
+        @select="onAssignCurrentTeam"
+      />
+      <ConversationLabels compact />
       <MoreActions :conversation-id="currentChat.id" />
     </div>
   </div>

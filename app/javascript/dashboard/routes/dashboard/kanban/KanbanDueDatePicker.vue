@@ -17,6 +17,7 @@ import {
 } from 'date-fns';
 
 import Popover from 'dashboard/components-next/popover/Popover.vue';
+import Select from 'dashboard/components-next/select/Select.vue';
 
 const props = defineProps({
   label: {
@@ -94,6 +95,9 @@ const yearOptions = computed(() => {
 
   return Array.from({ length: 17 }, (_, index) => startYear + index);
 });
+const yearSelectOptions = computed(() =>
+  yearOptions.value.map(year => ({ value: year, label: String(year) }))
+);
 const calendarDays = computed(() => {
   const start = startOfWeek(startOfMonth(currentMonth.value), {
     weekStartsOn: 0,
@@ -119,15 +123,18 @@ watch(
   { immediate: true }
 );
 
+// Emit the new value directly: defineModel only writes back on the next parent
+// render, so reading modelValue here would still give the previous value.
 const selectDate = (date, hide) => {
-  modelValue.value = toDateValue(date);
-  emit('change', modelValue.value);
+  const value = toDateValue(date);
+  modelValue.value = value;
+  emit('change', value);
   hide();
 };
 
 const clearDate = () => {
   modelValue.value = '';
-  emit('change', modelValue.value);
+  emit('change', '');
 };
 
 const setCurrentMonth = value => {
@@ -194,29 +201,22 @@ const dayClasses = day => ({
               <i class="i-lucide-chevron-left size-4" />
             </button>
 
-            <select
-              class="min-h-8 flex-1 rounded-md border border-n-weak bg-n-surface-1 px-2 text-sm font-medium text-n-slate-12 outline-none focus:border-n-brand"
-              :value="currentMonth.getMonth()"
-              @change="setCurrentMonth($event.target.value)"
-            >
-              <option
-                v-for="month in monthOptions"
-                :key="month.value"
-                :value="month.value"
-              >
-                {{ month.label }}
-              </option>
-            </select>
+            <Select
+              :model-value="currentMonth.getMonth()"
+              :options="monthOptions"
+              full-width
+              class="flex-1"
+              @update:model-value="setCurrentMonth"
+            />
 
-            <select
-              class="min-h-8 w-24 rounded-md border border-n-weak bg-n-surface-1 px-2 text-sm font-medium text-n-slate-12 outline-none focus:border-n-brand"
-              :value="currentMonth.getFullYear()"
-              @change="setCurrentYear($event.target.value)"
-            >
-              <option v-for="year in yearOptions" :key="year" :value="year">
-                {{ year }}
-              </option>
-            </select>
+            <div class="w-28 flex-shrink-0">
+              <Select
+                :model-value="currentMonth.getFullYear()"
+                :options="yearSelectOptions"
+                full-width
+                @update:model-value="setCurrentYear"
+              />
+            </div>
 
             <button
               type="button"

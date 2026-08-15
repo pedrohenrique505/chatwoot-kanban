@@ -1,4 +1,5 @@
 class Api::V1::Accounts::KanbanBoardsController < Api::V1::Accounts::BaseController
+  include KanbanCardFilterParams
   before_action :check_authorization
   before_action :fetch_kanban_board, only: [:show, :update, :destroy]
 
@@ -7,15 +8,25 @@ class Api::V1::Accounts::KanbanBoardsController < Api::V1::Accounts::BaseControl
     fetch_overview_data
   end
 
+  def templates
+    @templates = KanbanBoards::TemplateCatalog.previews(locale: Current.account.locale)
+  end
+
   def show
     sanitized_inbox_filter_ids
     sanitized_assignee_filter_ids
+    sanitized_card_statuses
+    sanitized_priorities
+    sanitized_due_dates
+    sanitized_labels
+    sanitized_match_mode
     @kanban_stages = @kanban_board.kanban_stages.active.ordered
     fetch_stage_card_results
   end
 
   def create
     @kanban_board = KanbanBoard.create!(kanban_board_params.merge(account: Current.account))
+    KanbanBoards::ApplyTemplateService.new(kanban_board: @kanban_board, template_key: params[:template_key]).perform!
   end
 
   def update
@@ -31,7 +42,15 @@ class Api::V1::Accounts::KanbanBoardsController < Api::V1::Accounts::BaseControl
   private
 
   def fetch_kanban_board
-    @kanban_board = policy_scope(KanbanBoard).find(params[:id])
+    # Administrators manage boards through the single create/edit form, which needs to
+    # load and mutate a board while it is still a draft (active: false, not yet
+    # activated). policy_scope filters drafts out for everyone, so admins bypass it here;
+    # non-admins keep the existing active + visibility restriction.
+    @kanban_board = if Current.account_user&.administrator?
+                      KanbanBoard.where(account_id: Current.account.id).find(params[:id])
+                    else
+                      policy_scope(KanbanBoard).find(params[:id])
+                    end
   end
 
   def fetch_overview_data
@@ -84,7 +103,10 @@ class Api::V1::Accounts::KanbanBoardsController < Api::V1::Accounts::BaseControl
   end
 
   def kanban_board_params
-    params.require(:kanban_board).permit(:name, :description, :position, :active, :auto_create_cards_from_conversations)
+    params.require(:kanban_board).permit(
+      :name, :description, :position, :active, :auto_create_cards_from_conversations,
+      :won_stage_id, :lost_stage_id, :lost_reason_required
+    )
   end
 
   def fetch_stage_card_results
@@ -96,71 +118,12 @@ class Api::V1::Accounts::KanbanBoardsController < Api::V1::Accounts::BaseControl
         kanban_board: @kanban_board,
         kanban_stage: kanban_stage,
         limit: @stage_card_limit,
-        filtered_inbox_ids: sanitized_inbox_filter_ids,
-        filtered_assignee_ids: sanitized_assignee_filter_ids,
+        **kanban_card_filter_params,
         visible_inbox_ids: board_list_inbox_ids,
         visible_team_ids: board_list_team_ids,
         account_user: Current.account_user
       ).call
     end
-  end
-
-  def sanitized_inbox_filter_ids
-    return @sanitized_inbox_filter_ids if defined?(@sanitized_inbox_filter_ids)
-
-    inbox_ids = normalized_inbox_filter_ids
-    @sanitized_inbox_filter_ids =
-      if inbox_ids.blank?
-        nil
-      else
-        validate_account_inbox_ids!(inbox_ids)
-        inbox_ids & board_filterable_inbox_ids(inbox_ids)
-      end
-  end
-
-  def normalized_inbox_filter_ids
-    Array(params[:inbox_ids]).filter_map(&:presence).map(&:to_i).uniq
-  end
-
-  def sanitized_assignee_filter_ids
-    return @sanitized_assignee_filter_ids if defined?(@sanitized_assignee_filter_ids)
-
-    assignee_ids = normalized_assignee_filter_ids
-    @sanitized_assignee_filter_ids =
-      if assignee_ids.blank?
-        nil
-      else
-        validate_account_user_ids!(assignee_ids)
-        assignee_ids
-      end
-  end
-
-  def normalized_assignee_filter_ids
-    Array(params[:assignee_ids]).filter_map(&:presence).map(&:to_i).uniq
-  end
-
-  def validate_account_inbox_ids!(inbox_ids)
-    return if inbox_ids.blank?
-
-    valid_inbox_count = Inbox.where(account_id: Current.account.id, id: inbox_ids).count
-    return if valid_inbox_count == inbox_ids.length
-
-    raise ActiveRecord::RecordInvalid, @kanban_board
-  end
-
-  def validate_account_user_ids!(user_ids)
-    return if user_ids.blank?
-
-    valid_user_count = Current.account.account_users.where(user_id: user_ids).count
-    return if valid_user_count == user_ids.length
-
-    raise ActiveRecord::RecordInvalid, @kanban_board
-  end
-
-  def board_filterable_inbox_ids(inbox_ids)
-    return inbox_ids if @kanban_board.all_inboxes?
-
-    @kanban_board.kanban_board_inboxes.where(inbox_id: inbox_ids).pluck(:inbox_id)
   end
 
   def dispatch_kanban_board_event(event_name)

@@ -29,8 +29,41 @@ class KanbanBoardsAPI extends ApiClient {
     return axios.delete(`${this.url}/${boardId}/stages/${stageId}`);
   }
 
+  copyStage(boardId, stageId, payload) {
+    return axios.post(`${this.url}/${boardId}/stages/${stageId}/copy`, payload);
+  }
+
+  moveStage(boardId, stageId, payload) {
+    return axios.patch(
+      `${this.url}/${boardId}/stages/${stageId}/move`,
+      payload
+    );
+  }
+
+  sortStageCards(boardId, stageId, payload) {
+    return axios.patch(
+      `${this.url}/${boardId}/stages/${stageId}/sort_cards`,
+      payload
+    );
+  }
+
+  moveAllStageCards(boardId, stageId, payload) {
+    return axios.patch(
+      `${this.url}/${boardId}/stages/${stageId}/move_cards`,
+      payload
+    );
+  }
+
+  deleteAllStageCards(boardId, stageId) {
+    return axios.delete(`${this.url}/${boardId}/stages/${stageId}/cards`);
+  }
+
   getBoards(config = {}) {
     return axios.get(this.url, config);
+  }
+
+  templates() {
+    return axios.get(`${this.url}/templates`);
   }
 
   showBoard(boardId, config = {}) {
@@ -77,8 +110,19 @@ class KanbanBoardsAPI extends ApiClient {
     return axios.post(`${this.url}/${boardId}/cards/manual`, payload);
   }
 
+  lookupCards(boardId, { contactId, signal }) {
+    return axios.get(`${this.url}/${boardId}/cards/lookup`, {
+      params: { contact_id: contactId },
+      signal,
+    });
+  }
+
   updateCardById(boardId, cardId, payload) {
     return axios.patch(`${this.url}/${boardId}/cards/by_id/${cardId}`, payload);
+  }
+
+  reopenCardById(boardId, cardId) {
+    return axios.patch(`${this.url}/${boardId}/cards/by_id/${cardId}/reopen`);
   }
 
   showCardById(boardId, cardId) {
@@ -124,6 +168,78 @@ class KanbanBoardsAPI extends ApiClient {
 
   deleteCardById(boardId, cardId) {
     return axios.delete(`${this.url}/${boardId}/cards/by_id/${cardId}`);
+  }
+
+  getReasons(boardId) {
+    return axios.get(`${this.url}/${boardId}/reasons`);
+  }
+
+  createReason(boardId, payload) {
+    return axios.post(`${this.url}/${boardId}/reasons`, payload);
+  }
+
+  updateReason(boardId, reasonId, payload) {
+    return axios.patch(`${this.url}/${boardId}/reasons/${reasonId}`, payload);
+  }
+
+  deleteReason(boardId, reasonId) {
+    return axios.delete(`${this.url}/${boardId}/reasons/${reasonId}`);
+  }
+
+  getCustomFields(boardId) {
+    return axios.get(`${this.url}/${boardId}/custom_fields`);
+  }
+
+  createCustomField(boardId, payload) {
+    return axios.post(`${this.url}/${boardId}/custom_fields`, payload);
+  }
+
+  updateCustomField(boardId, fieldId, payload) {
+    return axios.patch(
+      `${this.url}/${boardId}/custom_fields/${fieldId}`,
+      payload
+    );
+  }
+
+  deleteCustomField(boardId, fieldId) {
+    return axios.delete(`${this.url}/${boardId}/custom_fields/${fieldId}`);
+  }
+
+  getCardFieldValues(boardId, cardId) {
+    return axios.get(
+      `${this.url}/${boardId}/cards/by_id/${cardId}/field_values`
+    );
+  }
+
+  updateCardFieldValues(boardId, cardId, payload) {
+    return axios.put(
+      `${this.url}/${boardId}/cards/by_id/${cardId}/field_values`,
+      payload
+    );
+  }
+
+  getCardProducts(boardId, cardId) {
+    return axios.get(`${this.url}/${boardId}/cards/by_id/${cardId}/products`);
+  }
+
+  createCardProduct(boardId, cardId, payload) {
+    return axios.post(
+      `${this.url}/${boardId}/cards/by_id/${cardId}/products`,
+      payload
+    );
+  }
+
+  updateCardProduct(boardId, cardId, productId, payload) {
+    return axios.patch(
+      `${this.url}/${boardId}/cards/by_id/${cardId}/products/${productId}`,
+      payload
+    );
+  }
+
+  deleteCardProduct(boardId, cardId, productId) {
+    return axios.delete(
+      `${this.url}/${boardId}/cards/by_id/${cardId}/products/${productId}`
+    );
   }
 }
 

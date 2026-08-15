@@ -11,6 +11,7 @@ export const conversationUrl = ({
   teamId,
   conversationType = '',
   foldersId,
+  assigneeType = 'all',
 }) => {
   let url = `accounts/${accountId}/conversations/${id}`;
   if (activeInbox) {
@@ -29,9 +30,14 @@ export const conversationUrl = ({
     url = `accounts/${accountId}/archived/conversations/${id}`;
   } else if (conversationType === 'email') {
     url = `accounts/${accountId}/email/conversations/${id}`;
+  } else if (assigneeType === 'me') {
+    url = `accounts/${accountId}/mine/conversations/${id}`;
   }
   return url;
 };
+
+export const kanbanConversationUrl = ({ accountId, boardId, conversationId }) =>
+  `accounts/${accountId}/kanban/${boardId}/conversations/${conversationId}`;
 
 export const conversationListPageURL = ({
   accountId,
@@ -40,6 +46,7 @@ export const conversationListPageURL = ({
   label,
   teamId,
   customViewId,
+  assigneeType = 'all',
 }) => {
   let url = `accounts/${accountId}/dashboard`;
   if (label) {
@@ -50,6 +57,8 @@ export const conversationListPageURL = ({
     url = `accounts/${accountId}/inbox/${inboxId}`;
   } else if (customViewId) {
     url = `accounts/${accountId}/custom_view/${customViewId}`;
+  } else if (assigneeType === 'me') {
+    url = `accounts/${accountId}/mine/conversations`;
   } else if (conversationType) {
     const urlMap = {
       mention: 'mentions/conversations',
@@ -111,15 +120,6 @@ export const hasValidAvatarUrl = avatarUrl => {
   } catch (error) {
     return false;
   }
-};
-
-export const timeStampAppendedURL = dataUrl => {
-  const url = new URL(dataUrl);
-  if (!url.searchParams.has('t')) {
-    url.searchParams.append('t', Date.now());
-  }
-
-  return url.toString();
 };
 
 export const getHostNameFromURL = url => {
