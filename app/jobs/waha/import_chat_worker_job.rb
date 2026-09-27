@@ -1,5 +1,5 @@
 class Waha::ImportChatWorkerJob < ApplicationJob
-  queue_as :low
+  queue_as :waha_import
 
   # Pause between chats. Applied as an enqueue delay rather than a sleep so the
   # worker hands its Sidekiq thread back between chats instead of pinning it.

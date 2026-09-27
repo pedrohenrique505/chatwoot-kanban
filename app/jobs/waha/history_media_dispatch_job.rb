@@ -1,5 +1,5 @@
 class Waha::HistoryMediaDispatchJob < ApplicationJob
-  queue_as :low
+  queue_as :waha_import
 
   # Initial-import media is deliberately held until textual convergence reaches
   # a terminal state. This dispatcher is idempotent: duplicate recovery runs may

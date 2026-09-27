@@ -1,5 +1,5 @@
 class Waha::HistoryImportJob < ApplicationJob
-  queue_as :low
+  queue_as :waha_import
 
   MAX_RETRIES = 5
   INITIAL_DELAY = ENV.fetch('WAHA_INITIAL_IMPORT_DELAY_SECONDS', 120).to_i.seconds

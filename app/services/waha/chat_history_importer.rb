@@ -21,7 +21,7 @@ class Waha::ChatHistoryImporter
   # recent gap recovery remains actionable. Returns the number of messages written.
   # Best-effort: only what WhatsApp synced to the device is available.
   def run
-    imported = import_messages
+    imported = Waha::ParticipantResolver.caching { import_messages }
     heartbeat
     finalize_conversation if imported.positive?
     enqueue_media unless initial_import?
@@ -179,19 +179,42 @@ class Waha::ChatHistoryImporter
     "WAHA history import stalled for chat #{chat_id} at timestamp #{cursor[:ts]}: a full page made no progress"
   end
 
-  # Per-page progress on the chat's own row (single-row write, no jsonb churn):
-  # bumps its imported count and persists the composite cursor for mid-chat resume.
+  # One transaction per page: the page's messages and its progress checkpoint
+  # (imported count + composite cursor for mid-chat resume) commit together,
+  # under a single chat lock, instead of one commit per message. Network-bound
+  # enrichment runs first, so the lock and the connection only cover DB work.
   def write_page(new_items, next_cursor)
-    imported = new_items.count { |payload| write_message(payload) }
-    observe(new_items)
-    checkpoint(
-      cursor: next_cursor[:ts], cursor_message_id: next_cursor[:id], media_message_ids: @media_message_ids.to_a,
-      imported_count: import_chat.imported_count + imported,
-      pass_imported_count: import_chat.pass_imported_count + imported,
-      pass_observed_message_count: @observed_message_count,
-      pass_observed_message_digest: @observed_message_digest
-    )
-    imported
+    writers = prepare_writers(new_items)
+    Waha::Locking.with_chat_lock(channel, page_lock_jids(writers)) do
+      imported = new_items.count { |payload| write_message(payload, writers[payload]) }
+      observe(new_items)
+      checkpoint(
+        cursor: next_cursor[:ts], cursor_message_id: next_cursor[:id], media_message_ids: @media_message_ids.to_a,
+        imported_count: import_chat.imported_count + imported,
+        pass_imported_count: import_chat.pass_imported_count + imported,
+        pass_observed_message_count: @observed_message_count,
+        pass_observed_message_digest: @observed_message_digest
+      )
+      imported
+    end
+  end
+
+  def prepare_writers(new_items)
+    new_items.each_with_object({}.compare_by_identity) do |payload, writers|
+      stanza = Waha::Anchoring.stanza_of(payload['id'])
+      next if stanza.blank? || @existing_messages[stanza]
+
+      writers[payload] = Waha::HistoryMessageWriter.new(
+        channel: channel, payload: payload, conversation: @conversation, kind: kind
+      ).prepare
+    end
+  end
+
+  # Every writer re-takes its own chat locks inside the page transaction. Holding
+  # their union up front makes those re-takes no-ops and keeps the acquisition
+  # order sorted, so the page can't deadlock against a live webhook.
+  def page_lock_jids(writers)
+    candidate_chat_jids | writers.values.flat_map(&:lock_chat_jids)
   end
 
   def observe(payloads)
@@ -201,7 +224,7 @@ class Waha::ChatHistoryImporter
     end
   end
 
-  def write_message(payload)
+  def write_message(payload, writer)
     stanza = Waha::Anchoring.stanza_of(payload['id'])
     return false if stanza.blank?
 
@@ -211,10 +234,7 @@ class Waha::ChatHistoryImporter
       return false
     end
 
-    message = Waha::HistoryMessageWriter.new(
-      channel: channel, payload: payload, conversation: @conversation, kind: kind
-    ).perform
-
+    message = writer.perform
     return false unless message
 
     @existing_messages[stanza] = message.id

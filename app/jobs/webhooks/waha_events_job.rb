@@ -1,9 +1,8 @@
 # rubocop:disable Metrics/ClassLength
 class Webhooks::WahaEventsJob < ApplicationJob
   # Live inbound WhatsApp traffic, on the same queue as the other realtime channel
-  # webhooks. It must not sit on :low, which is the lowest-priority queue and also
-  # carries the bulk history-import work — an import would delay every incoming
-  # message behind it.
+  # webhooks. It must not share a queue with the bulk history import
+  # (:waha_import) — an import would delay every incoming message behind it.
   queue_as :default
 
   # A delivery ack can arrive while the mirror (message.any) is still being

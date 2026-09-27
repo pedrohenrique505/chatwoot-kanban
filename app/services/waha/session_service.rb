@@ -5,6 +5,12 @@ class Waha::SessionService
   # channel that only subscribes to message.any/message.ack never receives them.
   WEBHOOK_EVENTS = %w[message.any message.ack message.ack.group message.edited message.revoked message.reaction poll.vote session.status].freeze
 
+  # Stories, channels (newsletters) and broadcast lists are never represented in
+  # Chatwoot (see Waha::InboundEventPolicy), so WAHA drops them at the source
+  # instead of posting one webhook per story. Replies to them arrive on the
+  # contact's direct chat, which stays subscribed.
+  IGNORED_CHATS = { status: true, channels: true, broadcast: true }.freeze
+
   def start
     safely('start') do
       create_session
@@ -13,14 +19,15 @@ class Waha::SessionService
   end
 
   # WAHA only applies session config on creation, so a session created before a
-  # config change keeps its old webhook until we PUT the update. Given the GET
-  # session response, this pushes our current webhook config only when it drifted,
-  # avoiding needless session restarts on every status poll.
+  # config change keeps its old config until we PUT the update. Given the GET
+  # session response, this pushes our current config only when it drifted,
+  # avoiding needless session restarts on every status poll. The PUT replaces the
+  # whole config, so it always carries every setting we own.
   def sync_webhook_config(session_info)
-    return if webhook_current?(session_info)
+    return if webhook_current?(session_info) && ignore_current?(session_info)
 
     safely('sync webhook for') do
-      http_client.request(:put, "sessions/#{channel.session_name}", { config: { webhooks: [webhook_config] } })
+      http_client.request(:put, "sessions/#{channel.session_name}", { config: session_config })
     end
   end
 
@@ -73,7 +80,11 @@ class Waha::SessionService
   end
 
   def session_payload
-    { name: channel.session_name, start: true, config: { webhooks: [webhook_config] } }
+    { name: channel.session_name, start: true, config: session_config }
+  end
+
+  def session_config
+    { webhooks: [webhook_config], ignore: IGNORED_CHATS }
   end
 
   def webhook_config
@@ -90,6 +101,13 @@ class Waha::SessionService
       webhook['url'] == channel.webhook_url &&
         WEBHOOK_EVENTS.all? { |event| Array(webhook['events']).include?(event) }
     end
+  end
+
+  def ignore_current?(session_info)
+    ignore = session_info.is_a?(Hash) ? session_info.dig('config', 'ignore') : nil
+    return false unless ignore.is_a?(Hash)
+
+    IGNORED_CHATS.all? { |key, value| ignore[key.to_s] == value }
   end
 
   def http_client

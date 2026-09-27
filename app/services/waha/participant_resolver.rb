@@ -11,8 +11,24 @@ class Waha::ParticipantResolver
 
   pattr_initialize [:channel!, :jid!, :push_name, :sender_alt]
 
+  CACHE_KEY = :waha_participant_cache
+
+  # Memoizes profiles for the duration of the block. History import wraps one
+  # chat in it, so a group's recurring senders cost a single lookup, and every
+  # WAHA call can be made up front and replayed from memory inside a transaction.
+  def self.caching
+    previous = ActiveSupport::IsolatedExecutionState[CACHE_KEY]
+    ActiveSupport::IsolatedExecutionState[CACHE_KEY] = previous || {}
+    yield
+  ensure
+    ActiveSupport::IsolatedExecutionState[CACHE_KEY] = previous
+  end
+
   def perform
-    Profile.new(display_name, phone_number)
+    cache = ActiveSupport::IsolatedExecutionState[CACHE_KEY]
+    return Profile.new(display_name, phone_number) unless cache
+
+    cache[[channel.id, jid, push_name, sender_alt]] ||= Profile.new(display_name, phone_number)
   end
 
   private

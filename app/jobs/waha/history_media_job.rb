@@ -1,5 +1,5 @@
 class Waha::HistoryMediaJob < ApplicationJob
-  queue_as :low
+  queue_as :waha_import
 
   # Shorter than the default so a batch of expired-media fetches (old WhatsApp
   # media is frequently gone) doesn't tie up a worker for minutes per message.

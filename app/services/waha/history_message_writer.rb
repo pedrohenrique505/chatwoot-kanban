@@ -10,12 +10,24 @@ class Waha::HistoryMessageWriter
   # Returns the persisted message.
   pattr_initialize [:channel!, :payload!, :conversation!, { kind: 'initial' }]
 
+  # Everything that can call WAHA (mention names, the group sender, a quoted
+  # message's author) goes through Waha::ParticipantResolver. Run inside its
+  # #caching block, this resolves those lookups before a caller opens the page
+  # transaction, so #perform replays them from memory while holding the lock.
+  def prepare
+    text_content
+    build_content_attributes
+    self
+  end
+
+  # Joins the caller's transaction when there is one: the savepoint confines a
+  # duplicate-key rollback to this message instead of the caller's whole page.
   def perform
     Waha::Locking.with_chat_lock(channel, lock_chat_jids) do
       existing = find_canonical_message
       return existing if existing
 
-      ActiveRecord::Base.transaction do
+      ActiveRecord::Base.transaction(requires_new: true) do
         build_message
         converter.attach(@message) unless converter.downloads_attachment?
         @message.imported = initial_import?
@@ -29,6 +41,10 @@ class Waha::HistoryMessageWriter
     find_canonical_message || raise
   end
 
+  def lock_chat_jids
+    candidate_chat_jids
+  end
+
   private
 
   def stanza
@@ -37,10 +53,6 @@ class Waha::HistoryMessageWriter
 
   def canonical_chat_jid
     conversation.contact_inbox&.source_id || chat_id
-  end
-
-  def lock_chat_jids
-    candidate_chat_jids
   end
 
   def candidate_chat_jids
@@ -87,7 +99,9 @@ class Waha::HistoryMessageWriter
   end
 
   def text_content
-    converter.content
+    return @text_content if defined?(@text_content)
+
+    @text_content = converter.content
   end
 
   # Media downloads stay the live path's concern (Waha::HistoryMediaJob attaches
