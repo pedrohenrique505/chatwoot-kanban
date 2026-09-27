@@ -23,6 +23,20 @@ RSpec.describe KanbanCards::VisibleStageCardsQuery do
       expect(result.total_count).to eq(3)
     end
 
+    it 'sums discounted totals by card' do
+      percentage_card = create_visible_card(position: 1)
+      create_card_product(percentage_card, unit_price: 100, quantity: 2)
+      percentage_card.update!(discount_type: :percent, discount_amount: 10)
+
+      amount_card = create_visible_card(position: 2)
+      create_card_product(amount_card, unit_price: 300, quantity: 1)
+      amount_card.update!(discount_type: :amount, discount_amount: 50)
+
+      result = query.call
+
+      expect(result.total_value).to eq('430.0')
+    end
+
     it 'uses a default limit of 20' do
       cards = create_visible_cards(21)
 
@@ -130,10 +144,10 @@ RSpec.describe KanbanCards::VisibleStageCardsQuery do
       expect(result.next_cursor).to eq({ after_id: filtered_cards.first.id })
     end
 
-    it 'filters conversation cards by assignee ids when provided' do
+    it 'filters cards by assignee ids when provided' do
       second_agent = create(:user, account: account, role: :agent)
-      create_conversation_card(position: 1, assignee: agent)
-      filtered_card = create_conversation_card(position: 2, assignee: second_agent)
+      create_conversation_card(position: 1, assignees: [agent])
+      filtered_card = create_conversation_card(position: 2, assignees: [second_agent])
 
       result = query(filtered_assignee_ids: [second_agent.id]).call
 
@@ -141,12 +155,33 @@ RSpec.describe KanbanCards::VisibleStageCardsQuery do
       expect(result.total_count).to eq(1)
     end
 
+    it 'matches cards that carry any of the filtered assignees' do
+      second_agent = create(:user, account: account, role: :agent)
+      create_conversation_card(position: 1, assignees: [agent])
+      shared_card = create_conversation_card(position: 2, assignees: [agent, second_agent])
+
+      result = query(filtered_assignee_ids: [second_agent.id]).call
+
+      expect(result.cards).to eq([shared_card])
+      expect(result.total_count).to eq(1)
+    end
+
+    it 'ignores the conversation assignee when filtering by assignee ids' do
+      second_agent = create(:user, account: account, role: :agent)
+      create_conversation_card(position: 1, assignee: second_agent)
+
+      result = query(filtered_assignee_ids: [second_agent.id]).call
+
+      expect(result.cards).to be_empty
+      expect(result.total_count).to eq(0)
+    end
+
     it 'keeps cursor and has_more coherent for assignee filtered cards' do
       second_agent = create(:user, account: account, role: :agent)
-      create_conversation_card(position: 1, assignee: agent)
+      create_conversation_card(position: 1, assignees: [agent])
       filtered_cards = [
-        create_conversation_card(position: 2, assignee: second_agent),
-        create_conversation_card(position: 3, assignee: second_agent)
+        create_conversation_card(position: 2, assignees: [second_agent]),
+        create_conversation_card(position: 3, assignees: [second_agent])
       ]
 
       result = query(limit: 1, filtered_assignee_ids: [second_agent.id]).call
@@ -161,9 +196,9 @@ RSpec.describe KanbanCards::VisibleStageCardsQuery do
       second_agent = create(:user, account: account, role: :agent)
       second_inbox = create(:inbox, account: account)
       create(:inbox_member, user: agent, inbox: second_inbox)
-      create_conversation_card(position: 1, inbox: inbox, assignee: second_agent)
-      filtered_card = create_conversation_card(position: 2, inbox: second_inbox, assignee: second_agent)
-      create_conversation_card(position: 3, inbox: second_inbox, assignee: agent)
+      create_conversation_card(position: 1, inbox: inbox, assignees: [second_agent])
+      filtered_card = create_conversation_card(position: 2, inbox: second_inbox, assignees: [second_agent])
+      create_conversation_card(position: 3, inbox: second_inbox, assignees: [agent])
 
       result = query(filtered_inbox_ids: [second_inbox.id], filtered_assignee_ids: [second_agent.id]).call
 
@@ -171,13 +206,182 @@ RSpec.describe KanbanCards::VisibleStageCardsQuery do
       expect(result.total_count).to eq(1)
     end
 
-    it 'excludes manual cards when assignee filter is active' do
-      manual_card = create_visible_card(position: 1)
-      create_conversation_card(position: 2, assignee: agent)
+    it 'combines filter categories with all or any matching' do
+      create(:label, account: account, title: 'vip')
+      high_priority_card = create_visible_card(position: 1, priority: :high)
+      labeled_card = create_visible_card(position: 2)
+      matching_card = create_visible_card(position: 3, priority: :high)
+      labeled_card.add_labels(['vip'])
+      matching_card.add_labels(['vip'])
+
+      all_match_result = query(filtered_priorities: ['high'], filtered_labels: ['vip']).call
+      any_match_result = query(filtered_priorities: ['high'], filtered_labels: ['vip'], match_mode: 'any').call
+
+      expect(all_match_result.cards).to eq([matching_card])
+      expect(any_match_result.cards).to eq([high_priority_card, labeled_card, matching_card])
+    end
+
+    it 'filters cards by status relative to the board terminal stages' do
+      won_stage = create(:kanban_stage, account: account, kanban_board: kanban_board, position: 2)
+      lost_stage = create(:kanban_stage, account: account, kanban_board: kanban_board, position: 3)
+      kanban_board.update!(won_stage: won_stage, lost_stage: lost_stage)
+      open_card = create_visible_card(position: 1)
+      won_card = create_visible_card(kanban_stage: won_stage, position: 1)
+      lost_card = create_visible_card(kanban_stage: lost_stage, position: 1)
+
+      expect(query(filtered_card_statuses: ['open']).call.cards).to eq([open_card])
+      expect(query(kanban_stage: won_stage, filtered_card_statuses: ['won']).call.cards).to eq([won_card])
+      expect(query(kanban_stage: lost_stage, filtered_card_statuses: ['lost']).call.cards).to eq([lost_card])
+    end
+
+    it 'applies the default period only to terminal stages' do
+      won_stage = create(:kanban_stage, account: account, kanban_board: kanban_board, position: 2)
+      lost_stage = create(:kanban_stage, account: account, kanban_board: kanban_board, position: 3)
+      kanban_board.update!(won_stage: won_stage, lost_stage: lost_stage)
+
+      recent_won_card = create_visible_card(kanban_stage: won_stage)
+      old_won_card = create_visible_card(kanban_stage: won_stage)
+      old_won_card.update_column(:stage_entered_at, 31.days.ago) # rubocop:disable Rails/SkipsModelValidations
+      old_regular_card = create_visible_card
+      old_regular_card.update_column(:stage_entered_at, 31.days.ago) # rubocop:disable Rails/SkipsModelValidations
+
+      expect(query(kanban_stage: won_stage).call.cards).to eq([recent_won_card])
+      expect(query.call.cards).to include(old_regular_card)
+    end
+
+    it 'does not filter terminal cards when the period is all time' do
+      won_stage = create(:kanban_stage, account: account, kanban_board: kanban_board, position: 2)
+      lost_stage = create(:kanban_stage, account: account, kanban_board: kanban_board, position: 3)
+      kanban_board.update!(won_stage: won_stage, lost_stage: lost_stage)
+
+      recent_card = create_visible_card(kanban_stage: won_stage)
+      old_card = create_visible_card(kanban_stage: won_stage)
+      old_card.update_column(:stage_entered_at, 31.days.ago) # rubocop:disable Rails/SkipsModelValidations
+
+      result = query(kanban_stage: won_stage, terminal_period: 'all').call
+
+      expect(result.cards).to contain_exactly(recent_card, old_card)
+      expect(result.total_count).to eq(2)
+    end
+
+    it 'keeps the terminal period as an AND condition with any user filters' do
+      create(:label, account: account, title: 'vip')
+      won_stage = create(:kanban_stage, account: account, kanban_board: kanban_board, position: 2)
+      lost_stage = create(:kanban_stage, account: account, kanban_board: kanban_board, position: 3)
+      kanban_board.update!(won_stage: won_stage, lost_stage: lost_stage)
+
+      recent_card = create_visible_card(kanban_stage: won_stage, priority: :high)
+      old_card = create_visible_card(kanban_stage: won_stage)
+      old_card.add_labels(['vip'])
+      old_card.update_column(:stage_entered_at, 31.days.ago) # rubocop:disable Rails/SkipsModelValidations
+
+      result = query(
+        kanban_stage: won_stage,
+        terminal_period: '30d',
+        filtered_priorities: ['high'],
+        filtered_labels: ['vip'],
+        match_mode: 'any'
+      ).call
+
+      expect(result.cards).to eq([recent_card])
+      expect(result.total_count).to eq(1)
+    end
+
+    it 'filters stale cards when the stage has an SLA' do
+      kanban_stage.update!(sla_hours: 24)
+      fresh_card = create_visible_card(position: 1)
+      stale_card = create_visible_card(position: 2)
+      fresh_card.update_column(:stage_entered_at, 12.hours.ago) # rubocop:disable Rails/SkipsModelValidations
+      stale_card.update_column(:stage_entered_at, 36.hours.ago) # rubocop:disable Rails/SkipsModelValidations
+
+      result = query(filtered_stage_sla: ['stale']).call
+
+      expect(result.cards).to eq([stale_card])
+      expect(result.total_count).to eq(1)
+    end
+
+    it 'counts every stale card in the stage, not only the loaded page' do
+      kanban_stage.update!(sla_hours: 24)
+      cards = create_visible_cards(3)
+      cards.each { |card| card.update_column(:stage_entered_at, 36.hours.ago) } # rubocop:disable Rails/SkipsModelValidations
+
+      result = query(limit: 1).call
+
+      expect(result.cards.length).to eq(1)
+      expect(result.stale_count).to eq(3)
+    end
+
+    it 'reports no stale cards for a stage without an SLA' do
+      create_visible_card(position: 1).update_column(:stage_entered_at, 500.hours.ago) # rubocop:disable Rails/SkipsModelValidations
+
+      expect(query.call.stale_count).to eq(0)
+    end
+
+    it 'returns no cards for a stage without an SLA when filtering stale cards' do
+      create_visible_card(position: 1).update_column(:stage_entered_at, 36.hours.ago) # rubocop:disable Rails/SkipsModelValidations
+
+      result = query(filtered_stage_sla: ['stale']).call
+
+      expect(result.cards).to be_empty
+      expect(result.total_count).to eq(0)
+    end
+
+    it 'filters card priorities including cards without a priority' do
+      unprioritized_card = create_visible_card(position: 1)
+      high_priority_card = create_visible_card(position: 2, priority: :high)
+
+      expect(query(filtered_priorities: ['none']).call.cards).to eq([unprioritized_card])
+      expect(query(filtered_priorities: ['high']).call.cards).to eq([high_priority_card])
+    end
+
+    it 'filters card due date buckets' do
+      no_due_date_card = create_visible_card(position: 1)
+      overdue_card = create_visible_card(position: 2, due_at: 1.hour.ago)
+      day_card = create_visible_card(position: 3, due_at: 12.hours.from_now)
+      week_card = create_visible_card(position: 4, due_at: 3.days.from_now)
+      month_card = create_visible_card(position: 5, due_at: 2.weeks.from_now)
+
+      expect(query(filtered_due_dates: ['none']).call.cards).to eq([no_due_date_card])
+      expect(query(filtered_due_dates: ['overdue']).call.cards).to eq([overdue_card])
+      expect(query(filtered_due_dates: ['day']).call.cards).to eq([day_card])
+      expect(query(filtered_due_dates: ['week']).call.cards).to eq([day_card, week_card])
+      expect(query(filtered_due_dates: ['month']).call.cards).to eq([day_card, week_card, month_card])
+    end
+
+    it 'filters cards by label and cards without labels' do
+      create(:label, account: account, title: 'vip')
+      unlabeled_card = create_visible_card(position: 1)
+      labeled_card = create_visible_card(position: 2)
+      labeled_card.add_labels(['vip'])
+
+      expect(query(filtered_labels: ['vip']).call.cards).to eq([labeled_card])
+      expect(query(filtered_labels: ['none']).call.cards).to eq([unlabeled_card])
+    end
+
+    it 'always combines search with category filters' do
+      create(:label, account: account, title: 'vip')
+      high_priority_card = create_visible_card(position: 1, priority: :high, subject: 'Needle in a haystack')
+      labeled_card = create_visible_card(position: 2, subject: 'Needle by label')
+      create_visible_card(position: 3, priority: :high, subject: 'Not a match')
+      labeled_card.add_labels(['vip'])
+
+      result = query(
+        filtered_priorities: ['high'],
+        filtered_labels: ['vip'],
+        match_mode: 'any',
+        search_query: 'needle'
+      ).call
+
+      expect(result.cards).to eq([high_priority_card, labeled_card])
+    end
+
+    it 'keeps manual cards when they carry the filtered assignee' do
+      manual_card = create_visible_card(position: 1, assignees: [agent])
+      create_visible_card(position: 2)
 
       result = query(filtered_assignee_ids: [agent.id]).call
 
-      expect(result.cards).not_to include(manual_card)
+      expect(result.cards).to eq([manual_card])
       expect(result.total_count).to eq(1)
     end
 
@@ -322,25 +526,14 @@ RSpec.describe KanbanCards::VisibleStageCardsQuery do
       expect(query_counts[:active_storage_blobs]).to be <= 3
     end
 
-    it 'does not query messages notes labels tags or taggings' do
-      contact = create(:contact, account: account)
-      conversation = create(:conversation, account: account, inbox: inbox, contact: contact)
-      create(
-        :kanban_card,
-        :conversation_origin,
-        kanban_board: kanban_board,
-        kanban_stage: kanban_stage,
-        conversation: conversation,
-        position: 1
-      )
-      create(:message, account: account, inbox: inbox, conversation: conversation)
-      create(:note, contact: contact)
-      contact.add_labels(['enterprise'])
+    it 'preloads card labels at the default page size' do
+      cards = create_visible_cards(20)
+      cards.each { |card| card.add_labels(['enterprise']) }
 
-      sql_queries = collect_sql_queries { query.call }
+      sql_queries = collect_sql_queries { query.call.cards.each { |card| card.labels.map(&:name) } }
       query_counts = visible_stage_cards_query_counts(sql_queries)
 
-      expect(query_counts.slice(:messages, :notes, :labels_tags_taggings)).to eq(messages: 0, notes: 0, labels_tags_taggings: 0)
+      expect(query_counts[:labels_tags_taggings]).to be <= 3
     end
 
     it 'explains the minimal ordered id query' do
@@ -356,15 +549,31 @@ RSpec.describe KanbanCards::VisibleStageCardsQuery do
   def query(**options)
     described_class.new(
       account: account,
-      user: options.fetch(:user, agent),
       kanban_board: kanban_board,
-      kanban_stage: kanban_stage,
+      kanban_stage: options.fetch(:kanban_stage, kanban_stage),
+      visible_cards: visible_cards_scope(**options),
       limit: options[:limit],
       cursor: options[:cursor],
+      terminal_period: options[:terminal_period],
+      filtered_stage_sla: options[:filtered_stage_sla]
+    )
+  end
+
+  def visible_cards_scope(**options)
+    KanbanCards::VisibleCardsScope.new(
+      account: account,
+      user: options.fetch(:user, agent),
+      kanban_board: kanban_board,
       account_user: options[:account_user],
       filtered_inbox_ids: options[:filtered_inbox_ids],
-      filtered_assignee_ids: options[:filtered_assignee_ids]
-    )
+      filtered_assignee_ids: options[:filtered_assignee_ids],
+      filtered_card_statuses: options[:filtered_card_statuses],
+      filtered_priorities: options[:filtered_priorities],
+      filtered_due_dates: options[:filtered_due_dates],
+      filtered_labels: options[:filtered_labels],
+      match_mode: options[:match_mode],
+      search_query: options[:search_query]
+    ).call
   end
 
   def explain_analyze_id_query
@@ -419,7 +628,8 @@ RSpec.describe KanbanCards::VisibleStageCardsQuery do
   end
 
   def create_visible_card(attributes = {})
-    create(
+    card_assignees = attributes.delete(:assignees)
+    card = create(
       :kanban_card,
       {
         account: account,
@@ -431,6 +641,8 @@ RSpec.describe KanbanCards::VisibleStageCardsQuery do
         position: 1
       }.merge(attributes)
     )
+    card.update_assignees!(card_assignees.map(&:id)) if card_assignees.present?
+    card
   end
 
   def create_conversation_card(attributes = {})
@@ -440,6 +652,19 @@ RSpec.describe KanbanCards::VisibleStageCardsQuery do
     conversation = create(:conversation, account: account, inbox: card_inbox, contact: contact, assignee: assignee)
 
     create_visible_card(attributes.merge(conversation: conversation, contact: contact, inbox: card_inbox, origin: 'conversation', subject: nil))
+  end
+
+  def create_card_product(card, attributes = {})
+    KanbanCardProduct.create!(
+      {
+        account: account,
+        kanban_card: card,
+        sku: SecureRandom.hex(4),
+        name: 'Product',
+        unit_price: 10,
+        quantity: 1
+      }.merge(attributes)
+    )
   end
 
   def avatar_fixture

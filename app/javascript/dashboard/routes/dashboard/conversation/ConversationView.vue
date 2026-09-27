@@ -1,4 +1,5 @@
 <script>
+import { computed } from 'vue';
 import { mapGetters } from 'vuex';
 import { useWindowSize } from '@vueuse/core';
 import { useUISettings } from 'dashboard/composables/useUISettings';
@@ -13,6 +14,8 @@ import SidepanelSwitch from 'dashboard/components-next/Conversation/SidepanelSwi
 import ConversationSidebar from 'dashboard/components/widgets/conversation/ConversationSidebar.vue';
 import ConversationSearchPanel from 'dashboard/components/widgets/conversation/ConversationSearchPanel.vue';
 import { conversationListPageURL } from 'dashboard/helper/URLHelper';
+import { EMBEDDED_CONVERSATION } from 'dashboard/composables/useEmbeddedConversation';
+import { goBackEmbedded } from 'dashboard/helper/embeddedConversationHistory';
 
 export default {
   components: {
@@ -22,6 +25,22 @@ export default {
     SidepanelSwitch,
     ConversationSidebar,
     ConversationSearchPanel,
+  },
+  provide() {
+    return {
+      [EMBEDDED_CONVERSATION]: computed(() =>
+        this.isEmbedded
+          ? {
+              sidebarOpen: this.embeddedSidebarOpen,
+              setSidebarOpen: this.setEmbeddedSidebarOpen,
+              goBack: this.goBackFromEmbedded,
+              listOpen: this.embeddedListOpen,
+              canToggleList: !this.isOnExpandedLayout,
+              toggleList: this.toggleEmbeddedList,
+            }
+          : null
+      ),
+    };
   },
   beforeRouteLeave(to, from, next) {
     // Clear selected state if navigating away from a conversation to a route without a conversationId to prevent stale data issues
@@ -52,9 +71,17 @@ export default {
       type: String,
       default: '',
     },
+    assigneeType: {
+      type: String,
+      default: wootConstants.ASSIGNEE_TYPE.ALL,
+    },
     foldersId: {
       type: [String, Number],
       default: 0,
+    },
+    backRoute: {
+      type: Object,
+      default: null,
     },
   },
   setup() {
@@ -77,6 +104,8 @@ export default {
       conversationFetchError: false,
       fetchingConversationId: null,
       isSyncingRouteWithArchivedState: false,
+      embeddedSidebarOpen: true,
+      hasEmbeddedListMounted: false,
     };
   },
   computed: {
@@ -85,10 +114,31 @@ export default {
       currentChat: 'getSelectedChat',
     }),
     showConversationList() {
+      if (this.isEmbedded) {
+        return this.embeddedListOpen;
+      }
       return this.isOnExpandedLayout ? !this.conversationId : true;
     },
     showMessageView() {
       return this.conversationId ? true : !this.isOnExpandedLayout;
+    },
+    isEmbedded() {
+      return !!this.backRoute;
+    },
+    embeddedListOpen() {
+      return !!this.uiSettings.is_embedded_conversation_list_open;
+    },
+    // An embedded conversation always has a conversation open, so on the
+    // expanded layout the list would never get a column of its own: keep the
+    // focused view there and only offer the list on wider layouts.
+    //
+    // Once expanded the list stays mounted and is only hidden on collapse:
+    // remounting it would re-fetch the whole list on every expand.
+    showConversationSidebarList() {
+      if (!this.isEmbedded) {
+        return true;
+      }
+      return this.hasEmbeddedListMounted && !this.isOnExpandedLayout;
     },
     isOnExpandedLayout() {
       if (this.windowWidth >= wootConstants.SMALL_SCREEN_BREAKPOINT) {
@@ -111,11 +161,23 @@ export default {
         return false;
       }
 
+      if (this.isEmbedded) {
+        return this.embeddedSidebarOpen;
+      }
+
       const { is_contact_sidebar_open: isContactSidebarOpen } = this.uiSettings;
       return isContactSidebarOpen;
     },
   },
   watch: {
+    embeddedListOpen: {
+      immediate: true,
+      handler(isOpen) {
+        if (isOpen) {
+          this.hasEmbeddedListMounted = true;
+        }
+      },
+    },
     conversationId() {
       this.conversationFetchError = false;
       this.fetchConversationIfUnavailable();
@@ -157,6 +219,13 @@ export default {
     initialize() {
       this.$store.dispatch('setActiveInbox', this.inboxId);
       this.setActiveChat();
+      // In embedded mode (e.g. opened from a kanban card) ChatList is only
+      // rendered while the list is expanded, so its conversation-load event
+      // cannot be relied on to trigger this. Check directly so a conversation
+      // missing from the store still gets fetched.
+      if (this.isEmbedded) {
+        this.fetchConversationIfUnavailable();
+      }
     },
     fetchConversationIfUnavailable() {
       if (!this.conversationId) {
@@ -182,7 +251,13 @@ export default {
       this.isFetchingConversation = true;
       this.conversationFetchError = false;
       try {
-        await this.$store.dispatch('getConversation', conversationId);
+        // The embedded route names one conversation and renders no list, so it
+        // must land in the store even when the "all" view would filter its inbox
+        // out. Without this the sidebar never gets a currentChat to render for.
+        await this.$store.dispatch('getConversation', {
+          conversationId,
+          forceUpsert: this.isEmbedded,
+        });
         // The route may have changed while the request was in flight.
         if (this.conversationId === conversationId) {
           this.setActiveChat();
@@ -203,7 +278,11 @@ export default {
       return chat;
     },
     syncRouteWithArchivedState(archivedAt) {
-      if (!this.conversationId || this.isSyncingRouteWithArchivedState) {
+      if (
+        this.isEmbedded ||
+        !this.conversationId ||
+        this.isSyncingRouteWithArchivedState
+      ) {
         return;
       }
       // Ignore stale updates while currentChat hasn't caught up with the
@@ -251,10 +330,14 @@ export default {
           return;
         }
         const { messageId } = this.$route.query;
-        // Conversation is already active: just scroll to the requested
-        // message instead of skipping navigation entirely.
+        // Conversation is already active: only honour an explicit message
+        // target. This runs again on every chat list change, so scrolling
+        // without one would yank an agent reading older messages back to the
+        // bottom whenever another conversation enters or leaves the list.
         if (selectedConversation.id === this.currentChat.id) {
-          this.scrollToSearchedMessage(messageId, selectedConversation.id);
+          if (messageId) {
+            this.scrollToSearchedMessage(messageId, selectedConversation.id);
+          }
           return;
         }
         this.$store
@@ -312,6 +395,17 @@ export default {
     onConversationSearchStateChange(searchState) {
       this.$refs.conversationBox?.onConversationSearchStateChange(searchState);
     },
+    setEmbeddedSidebarOpen(value) {
+      this.embeddedSidebarOpen = value;
+    },
+    toggleEmbeddedList() {
+      this.updateUISettings({
+        is_embedded_conversation_list_open: !this.embeddedListOpen,
+      });
+    },
+    goBackFromEmbedded() {
+      goBackEmbedded(this.$router, this.backRoute);
+    },
   },
 };
 </script>
@@ -319,11 +413,13 @@ export default {
 <template>
   <section class="flex w-full h-full min-w-0">
     <ChatList
+      v-if="showConversationSidebarList"
       :show-conversation-list="showConversationList"
       :conversation-inbox="inboxId"
       :label="label"
       :team-id="teamId"
       :conversation-type="conversationType"
+      :assignee-type="assigneeType"
       :folders-id="foldersId"
       :is-on-expanded-layout="isOnExpandedLayout"
       @conversation-load="onConversationLoad"

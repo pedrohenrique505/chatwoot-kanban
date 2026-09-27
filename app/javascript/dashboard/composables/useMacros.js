@@ -2,6 +2,7 @@ import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useStoreGetters } from 'dashboard/composables/store';
 import { PRIORITY_CONDITION_VALUES } from 'dashboard/constants/automation';
+import { kanbanDropdownValues } from 'dashboard/helper/kanbanActionOptions';
 
 /**
  * Composable for handling macro-related functionality
@@ -14,6 +15,9 @@ export const useMacros = () => {
   const labels = computed(() => getters['labels/getLabels'].value);
   const teams = computed(() => getters['teams/getTeams'].value);
   const agents = computed(() => getters['agents/getVerifiedAgents'].value);
+  const kanbanBoards = computed(
+    () => getters['kanbanBoards/kanbanBoards']?.value || []
+  );
 
   const withNoneOption = options => [
     { id: 'nil', name: t('AUTOMATION.NONE_OPTION') },
@@ -26,6 +30,13 @@ export const useMacros = () => {
    * @returns {Array} An array of dropdown values
    */
   const getMacroDropdownValues = type => {
+    const kanbanValues = kanbanDropdownValues(
+      type,
+      kanbanBoards.value,
+      agents.value
+    );
+    if (kanbanValues) return kanbanValues;
+
     switch (type) {
       case 'assign_team':
         return withNoneOption(teams.value);

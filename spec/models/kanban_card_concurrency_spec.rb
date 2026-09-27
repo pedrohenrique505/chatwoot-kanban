@@ -31,8 +31,8 @@ RSpec.describe KanbanCard, type: :model do
     create_inactive_card(first_stage)
 
     errors = run_concurrently(
-      -> { described_class.find(cards.first.id).reorder_to_position!(kanban_stage: KanbanStage.find(first_stage.id), position: 5) },
-      -> { described_class.find(cards.last.id).reorder_to_position!(kanban_stage: KanbanStage.find(first_stage.id), position: 1) }
+      -> { described_class.find(cards.first.id).reorder_to_position!(kanban_stage: KanbanStage.find(first_stage.id), position: 6000) },
+      -> { described_class.find(cards.last.id).reorder_to_position!(kanban_stage: KanbanStage.find(first_stage.id), position: 500) }
     )
 
     expect(errors).to be_empty
@@ -46,8 +46,8 @@ RSpec.describe KanbanCard, type: :model do
     create_inactive_card(second_stage)
 
     errors = run_concurrently(
-      -> { described_class.find(first_stage_cards.first.id).reorder_to_position!(kanban_stage: KanbanStage.find(second_stage.id), position: 1) },
-      -> { described_class.find(second_stage_cards.first.id).reorder_to_position!(kanban_stage: KanbanStage.find(first_stage.id), position: 1) }
+      -> { described_class.find(first_stage_cards.first.id).reorder_to_position!(kanban_stage: KanbanStage.find(second_stage.id), position: 500) },
+      -> { described_class.find(second_stage_cards.first.id).reorder_to_position!(kanban_stage: KanbanStage.find(first_stage.id), position: 500) }
     )
 
     expect(errors).to be_empty
@@ -60,7 +60,7 @@ RSpec.describe KanbanCard, type: :model do
     create_inactive_card(second_stage)
 
     errors = run_concurrently(
-      -> { described_class.find(source_cards.last.id).reorder_to_position!(kanban_stage: KanbanStage.find(second_stage.id), position: 1) },
+      -> { described_class.find(source_cards.last.id).reorder_to_position!(kanban_stage: KanbanStage.find(second_stage.id), position: 500) },
       -> { create_manual_card('Concurrent manual opportunity') }
     )
 
@@ -72,10 +72,11 @@ RSpec.describe KanbanCard, type: :model do
     source_cards = create_cards(first_stage, 3)
     create_cards(second_stage, 3)
     create_inactive_card(first_stage)
+    create(:kanban_board_entry_rule, account: account, kanban_board: board)
     conversation = create(:conversation, account: account, contact: contact, inbox: inbox)
 
     errors = run_concurrently(
-      -> { described_class.find(source_cards.last.id).reorder_to_position!(kanban_stage: KanbanStage.find(second_stage.id), position: 1) },
+      -> { described_class.find(source_cards.last.id).reorder_to_position!(kanban_stage: KanbanStage.find(second_stage.id), position: 500) },
       -> { KanbanCards::AutoCreateFromConversationService.new(Conversation.find(conversation.id)).perform! }
     )
 
@@ -104,6 +105,7 @@ RSpec.describe KanbanCard, type: :model do
 
   it 'creates one automatic card when concurrent creates use the same conversation' do
     create_cards(first_stage, 2)
+    create(:kanban_board_entry_rule, account: account, kanban_board: board)
     conversation = create(:conversation, account: account, contact: contact, inbox: inbox)
 
     errors = run_concurrently(
@@ -127,7 +129,7 @@ RSpec.describe KanbanCard, type: :model do
           described_class.lock_active_cards_for_stages!(board, [first_stage.id])
           lock_acquired << true
           sleep 0.2
-          described_class.find(cards.last.id).reorder_to_position!(kanban_stage: KanbanStage.find(first_stage.id), position: 1)
+          described_class.find(cards.last.id).reorder_to_position!(kanban_stage: KanbanStage.find(first_stage.id), position: 500)
         end
       },
       lambda {
@@ -164,7 +166,7 @@ RSpec.describe KanbanCard, type: :model do
         contact: contact,
         inbox: inbox,
         subject: "Opportunity #{stage.id}-#{index}",
-        position: index + 1
+        position: (index + 1) * KanbanCard::POSITION_GAP
       )
     end
   end
@@ -275,12 +277,15 @@ RSpec.describe KanbanCard, type: :model do
     items
   end
 
+  # Sparse positions carry no contiguity guarantee, so what has to hold after a race is that
+  # every active card in a stage still has a distinct position and the stage still has a
+  # single unambiguous order.
   # rubocop:disable Metrics/AbcSize
   def expect_card_invariants
     described_class.where(kanban_board: board).active.group_by(&:kanban_stage_id).each_value do |cards|
       positions = cards.sort_by { |card| [card.position, card.created_at, card.id] }.pluck(:position)
 
-      expect(positions).to eq((1..positions.length).to_a)
+      expect(positions).to eq(positions.sort)
       expect(positions.uniq.length).to eq(positions.length)
     end
 

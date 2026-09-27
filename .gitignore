@@ -96,6 +96,8 @@ yarn-debug.log*
 .cursor
 .codex/
 .claude/
+.agents/
+skills-lock.json
 CLAUDE.local.md
 
 # Histoire deployment
@@ -108,4 +110,5 @@ Procfile.worktree
 
 # Local project docs/notes (not for upstream sync)
 DOC uazapi/
+.slim/deepwork/
 .slim/

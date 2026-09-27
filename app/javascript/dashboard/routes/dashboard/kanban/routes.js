@@ -1,7 +1,12 @@
 import { frontendURL } from '../../../helper/URLHelper';
 import KanbanOverview from './KanbanOverview.vue';
 import KanbanView from './KanbanView.vue';
-import KanbanBoardSettings from './KanbanBoardSettings.vue';
+import KanbanAgendaView from './KanbanAgendaView.vue';
+import KanbanDashboardView from './KanbanDashboardView.vue';
+import KanbanListView from './KanbanListView.vue';
+import KanbanBoardForm from './KanbanBoardForm.vue';
+import KanbanBoardCreate from './KanbanBoardCreate.vue';
+import ConversationView from '../conversation/ConversationView.vue';
 
 const meta = {
   permissions: ['administrator', 'agent'],
@@ -21,9 +26,58 @@ export const routes = [
     meta,
   },
   {
-    path: frontendURL('accounts/:accountId/kanban/:boardId/settings'),
-    name: 'kanban_board_settings',
-    component: KanbanBoardSettings,
+    path: frontendURL('accounts/:accountId/kanban/:boardId/dashboard'),
+    name: 'kanban_board_dashboard',
+    component: KanbanDashboardView,
+    meta,
+  },
+  {
+    path: frontendURL('accounts/:accountId/kanban/:boardId/agenda'),
+    name: 'kanban_board_agenda',
+    component: KanbanAgendaView,
+    meta,
+  },
+  {
+    path: frontendURL('accounts/:accountId/kanban/:boardId/list'),
+    name: 'kanban_board_list',
+    component: KanbanListView,
+    meta,
+  },
+  {
+    path: frontendURL(
+      'accounts/:accountId/kanban/:boardId/conversations/:conversationId'
+    ),
+    name: 'kanban_board_conversation',
+    component: ConversationView,
+    meta,
+    props: route => {
+      const backRouteName =
+        route.query.kanban_view === 'list'
+          ? 'kanban_board_list'
+          : 'kanban_board_show';
+
+      return {
+        conversationId: route.params.conversationId,
+        backRoute: {
+          name: backRouteName,
+          params: {
+            accountId: route.params.accountId,
+            boardId: route.params.boardId,
+          },
+        },
+      };
+    },
+  },
+  {
+    path: frontendURL('accounts/:accountId/kanban/new'),
+    name: 'kanban_board_create_form',
+    component: KanbanBoardCreate,
+    meta: { permissions: ['administrator'] },
+  },
+  {
+    path: frontendURL('accounts/:accountId/kanban/:boardId/edit'),
+    name: 'kanban_board_edit_form',
+    component: KanbanBoardForm,
     meta,
   },
 ];

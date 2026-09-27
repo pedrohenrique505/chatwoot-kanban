@@ -6,6 +6,7 @@ import NextButton from 'dashboard/components-next/button/Button.vue';
 import SingleSelect from 'dashboard/components-next/filter/inputs/SingleSelect.vue';
 import MultiSelect from 'dashboard/components-next/filter/inputs/MultiSelect.vue';
 import NextInput from 'dashboard/components-next/input/Input.vue';
+import { parseBoardStageId } from 'dashboard/helper/kanbanActionOptions';
 
 export default {
   components: {
@@ -77,7 +78,7 @@ export default {
     },
     inputType() {
       return this.actionTypes.find(action => action.key === this.action_name)
-        .inputType;
+        ?.inputType;
     },
     actionNameAsSelectModel: {
       get() {
@@ -91,6 +92,86 @@ export default {
     },
     actionTypesAsOptions() {
       return this.actionTypes.map(a => ({ id: a.key, name: a.label }));
+    },
+    // Automation and macro action_params are a one-element array around the hash.
+    kanbanParams() {
+      return (
+        (Array.isArray(this.action_params)
+          ? this.action_params[0]
+          : this.action_params) || {}
+      );
+    },
+    kanbanStageSelection: {
+      get() {
+        const { kanban_board_id: boardId, kanban_stage_id: stageId } =
+          this.kanbanParams;
+        return (
+          this.dropdownValues.find(
+            option => option.id === `${boardId}:${stageId}`
+          ) || null
+        );
+      },
+      set(value) {
+        if (!value) {
+          this.action_params = [];
+          return;
+        }
+
+        const { kanbanBoardId, kanbanStageId } = parseBoardStageId(value.id);
+        this.action_params = [
+          { kanban_board_id: kanbanBoardId, kanban_stage_id: kanbanStageId },
+        ];
+      },
+    },
+    kanbanBoardSelection: {
+      get() {
+        return (
+          this.dropdownValues.find(
+            board => board.id === this.kanbanParams.kanban_board_id
+          ) || null
+        );
+      },
+      set(value) {
+        this.action_params = value
+          ? [{ kanban_board_id: value.id, agent_ids: [] }]
+          : [];
+      },
+    },
+    kanbanAgentOptions() {
+      return this.kanbanBoardSelection?.agents || [];
+    },
+    kanbanAgentSelections: {
+      get() {
+        const agentIds = this.kanbanParams.agent_ids || [];
+        return this.kanbanAgentOptions.filter(agent =>
+          agentIds.includes(agent.id)
+        );
+      },
+      set(value) {
+        const boardId = this.kanbanParams.kanban_board_id;
+        if (!boardId) return;
+
+        this.action_params = [
+          {
+            kanban_board_id: boardId,
+            agent_ids: (value || []).map(agent => agent.id),
+          },
+        ];
+      },
+    },
+    kanbanPlaceholders() {
+      if (this.isMacro) {
+        return {
+          stage: this.$t('MACROS.KANBAN_STAGE_PLACEHOLDER'),
+          board: this.$t('MACROS.KANBAN_BOARD_PLACEHOLDER'),
+          agent: this.$t('MACROS.KANBAN_AGENT_PLACEHOLDER'),
+        };
+      }
+      return {
+        stage: this.$t('AUTOMATION.KANBAN_STAGE_PLACEHOLDER'),
+        board: this.$t('AUTOMATION.KANBAN_BOARD_PLACEHOLDER'),
+        agent: this.$t('AUTOMATION.KANBAN_AGENT_PLACEHOLDER'),
+      };
     },
     isVerticalLayout() {
       return ['team_message', 'textarea'].includes(this.inputType);
@@ -139,7 +220,31 @@ export default {
         />
         <template v-if="showActionInput && !isVerticalLayout">
           <SingleSelect
-            v-if="inputType === 'search_select'"
+            v-if="inputType === 'kanban_stage'"
+            v-model="kanbanStageSelection"
+            :options="dropdownValues"
+            :placeholder="kanbanPlaceholders.stage"
+            :dropdown-max-height="dropdownMaxHeight"
+          />
+          <div
+            v-else-if="inputType === 'kanban_agents'"
+            class="flex flex-wrap items-center gap-2"
+          >
+            <SingleSelect
+              v-model="kanbanBoardSelection"
+              :options="dropdownValues"
+              :placeholder="kanbanPlaceholders.board"
+              :dropdown-max-height="dropdownMaxHeight"
+            />
+            <MultiSelect
+              v-model="kanbanAgentSelections"
+              :options="kanbanAgentOptions"
+              :placeholder="kanbanPlaceholders.agent"
+              :dropdown-max-height="dropdownMaxHeight"
+            />
+          </div>
+          <SingleSelect
+            v-else-if="inputType === 'search_select'"
             v-model="action_params"
             :options="dropdownValues"
             :dropdown-max-height="dropdownMaxHeight"

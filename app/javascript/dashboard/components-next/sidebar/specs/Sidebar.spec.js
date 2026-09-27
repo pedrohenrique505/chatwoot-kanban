@@ -6,6 +6,10 @@ import Sidebar from '../Sidebar.vue';
 const mockAccountId = ref(1);
 const mockWindowWidth = ref(1024);
 
+const mockIsCollapsed = ref(false);
+const mockSnapToCollapsed = vi.fn();
+const mockSnapToExpanded = vi.fn();
+
 vi.mock('vue-i18n', () => ({
   useI18n: () => ({
     t: key =>
@@ -39,11 +43,11 @@ vi.mock('../provider', () => ({
   provideSidebarContext: vi.fn(),
   useSidebarResize: () => ({
     sidebarWidth: ref(200),
-    isCollapsed: ref(false),
+    isCollapsed: mockIsCollapsed,
     setSidebarWidth: vi.fn(),
     saveWidth: vi.fn(),
-    snapToCollapsed: vi.fn(),
-    snapToExpanded: vi.fn(),
+    snapToCollapsed: mockSnapToCollapsed,
+    snapToExpanded: mockSnapToExpanded,
     COLLAPSED_THRESHOLD: 160,
   }),
 }));
@@ -175,10 +179,18 @@ const findKanbanGroup = wrapper =>
     .findAllComponents(SidebarGroupStub)
     .find(group => group.props('name') === 'Kanban');
 
+const findConversationGroup = wrapper =>
+  wrapper
+    .findAllComponents(SidebarGroupStub)
+    .find(group => group.props('name') === 'Conversation');
+
 describe('Sidebar', () => {
   beforeEach(() => {
     mockAccountId.value = 1;
     mockWindowWidth.value = 1024;
+    mockIsCollapsed.value = false;
+    mockSnapToCollapsed.mockClear();
+    mockSnapToExpanded.mockClear();
   });
 
   it('shows overview in the kanban submenu', () => {
@@ -219,7 +231,7 @@ describe('Sidebar', () => {
     const boardChild = findKanbanGroup(wrapper).props('children')[1];
 
     expect(boardChild).toMatchObject({
-      activeOn: ['kanban_board_show', 'kanban_board_settings'],
+      activeOn: ['kanban_board_show', 'kanban_board_edit_form'],
       to: {
         name: 'kanban_board_show',
         params: { accountId: 1, boardId: 7 },
@@ -236,7 +248,7 @@ describe('Sidebar', () => {
     expect(overview.activeOn).toEqual(['kanban_boards']);
     expect(board.activeOn).toEqual([
       'kanban_board_show',
-      'kanban_board_settings',
+      'kanban_board_edit_form',
     ]);
     expect(board.to.params.boardId).toBe(7);
   });
@@ -280,5 +292,37 @@ describe('Sidebar', () => {
 
     expect(groupNames).toContain('Conversation');
     expect(groupNames).toContain('Settings');
+  });
+
+  it('shows the My Conversations filter in the conversation submenu', () => {
+    const { wrapper } = mountSidebar();
+
+    expect(
+      findConversationGroup(wrapper)
+        .props('children')
+        .find(child => child.name === 'Mine')
+    ).toMatchObject({
+      label: 'SIDEBAR.MY_CONVERSATIONS',
+      activeOn: ['conversation_through_mine'],
+      to: {
+        name: 'conversation_mine',
+        params: { accountId: 1 },
+      },
+    });
+  });
+
+  it('toggles the desktop sidebar from the profile footer', async () => {
+    const { wrapper } = mountSidebar();
+
+    await wrapper.find('[data-sidebar-toggle]').trigger('click');
+
+    expect(mockSnapToCollapsed).toHaveBeenCalledOnce();
+
+    mockIsCollapsed.value = true;
+    const { wrapper: collapsedWrapper } = mountSidebar();
+
+    await collapsedWrapper.find('[data-sidebar-toggle]').trigger('click');
+
+    expect(mockSnapToExpanded).toHaveBeenCalledOnce();
   });
 });

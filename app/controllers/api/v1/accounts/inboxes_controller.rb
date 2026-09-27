@@ -46,6 +46,10 @@ class Api::V1::Accounts::InboxesController < Api::V1::Accounts::BaseController #
       )
       @inbox.save!
     end
+  rescue ActiveRecord::RecordNotUnique => e
+    raise unless waha_connection_unique_index_violation?(e)
+
+    render_waha_connection_in_use
   end
 
   def update
@@ -54,6 +58,10 @@ class Api::V1::Accounts::InboxesController < Api::V1::Accounts::BaseController #
     @inbox.update!(inbox_params)
     update_inbox_working_hours
     update_channel if channel_update_required?
+  rescue ActiveRecord::RecordNotUnique => e
+    raise unless waha_connection_unique_index_violation?(e)
+
+    render_waha_connection_in_use
   end
 
   def agent_bot
@@ -81,11 +89,7 @@ class Api::V1::Accounts::InboxesController < Api::V1::Accounts::BaseController #
     return head :not_found unless @inbox.waha?
 
     service = Waha::SessionService.new(channel: @inbox.channel)
-    status_data = service.status
-    if WAHA_STARTABLE_STATUSES.include?(status_data&.dig('status'))
-      service.start
-      status_data = service.status
-    end
+    status_data = start_waha_session_if_needed(service, service.status)
     # Push the current webhook config to sessions created before it changed.
     service.sync_webhook_config(status_data)
     qr = status_data&.dig('status') == 'SCAN_QR_CODE' ? service.qr_code : nil
@@ -95,7 +99,8 @@ class Api::V1::Accounts::InboxesController < Api::V1::Accounts::BaseController #
       qr_code: qr,
       phone_number: @inbox.channel.phone_number,
       status_history: @inbox.channel.status_history,
-      import_state: @inbox.channel.import_state.merge(@inbox.channel.import_progress)
+      import_state: @inbox.channel.import_state.merge(@inbox.channel.import_progress),
+      connection_error: @inbox.channel.connection_identity_conflict? ? @inbox.channel.connection_identity_error : nil
     }
   end
 
@@ -127,6 +132,14 @@ class Api::V1::Accounts::InboxesController < Api::V1::Accounts::BaseController #
 
   def fetch_agent_bot
     @agent_bot = AgentBot.accessible_to(Current.account).find(params[:agent_bot]) if params[:agent_bot]
+  end
+
+  def start_waha_session_if_needed(service, status_data)
+    return status_data unless @inbox.channel.auto_reconnect?
+    return status_data unless WAHA_STARTABLE_STATUSES.include?(status_data&.dig('status'))
+
+    service.start
+    service.status
   end
 
   def create_channel
@@ -225,6 +238,14 @@ class Api::V1::Accounts::InboxesController < Api::V1::Accounts::BaseController #
 
   def get_channel_attributes(channel_type)
     channel_type.constantize.const_defined?(:EDITABLE_ATTRS) ? channel_type.constantize::EDITABLE_ATTRS.presence : []
+  end
+
+  def waha_connection_unique_index_violation?(error)
+    error.message.include?('index_channel_waha_on_connection_identity')
+  end
+
+  def render_waha_connection_in_use
+    render json: { message: I18n.t('errors.messages.waha_connection_in_use'), attributes: [:base] }, status: :unprocessable_entity
   end
 end
 

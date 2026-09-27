@@ -28,6 +28,10 @@ import ShopifyOrdersList from 'dashboard/components/widgets/conversation/Shopify
 import SidebarActionsHeader from 'dashboard/components-next/SidebarActionsHeader.vue';
 import LinearIssuesList from 'dashboard/components/widgets/conversation/linear/IssuesList.vue';
 import LinearSetupCTA from 'dashboard/components/widgets/conversation/linear/LinearSetupCTA.vue';
+import {
+  useContactSidebar,
+  useEmbeddedConversation,
+} from 'dashboard/composables/useEmbeddedConversation';
 
 const props = defineProps({
   conversationId: {
@@ -49,6 +53,26 @@ const {
 
 const dragging = ref(false);
 const conversationSidebarItems = ref([]);
+const embedded = useEmbeddedConversation();
+const { closeSidePanels } = useContactSidebar();
+// Embedded conversations are opened from a kanban board, so the kanban
+// accordion starts expanded without persisting that to the UI settings.
+const isEmbeddedKanbanOpen = ref(true);
+const isKanbanOpen = computed(() =>
+  embedded.value
+    ? isEmbeddedKanbanOpen.value
+    : isContactSidebarItemOpen('is_kanban_open')
+);
+const kanbanSummary = ref({ count: 0, staleCount: 0 });
+const updateKanbanSummary = summary => {
+  kanbanSummary.value = summary;
+};
+watch(
+  () => props.conversationId,
+  () => {
+    kanbanSummary.value = { count: 0, staleCount: 0 };
+  }
+);
 
 const shopifyIntegration = useFunctionGetter(
   'integrations/getIntegration',
@@ -122,11 +146,13 @@ const onDragEnd = () => {
   });
 };
 
-const closeContactPanel = () => {
-  updateUISettings({
-    is_contact_sidebar_open: false,
-    is_copilot_panel_open: false,
-  });
+const toggleKanban = () => {
+  if (embedded.value) {
+    isEmbeddedKanbanOpen.value = !isEmbeddedKanbanOpen.value;
+    return;
+  }
+
+  toggleSidebarUIState('is_kanban_open');
 };
 
 onMounted(() => {
@@ -144,19 +170,43 @@ onMounted(() => {
   <div class="w-full">
     <SidebarActionsHeader
       :title="$t('CONVERSATION.SIDEBAR.CONTACT')"
-      @close="closeContactPanel"
+      @close="closeSidePanels"
     />
     <ContactInfo :contact="contact" :channel-type="channelType" />
     <div class="px-2 pb-8 list-group flex flex-col gap-3">
       <div class="conversation--actions">
         <AccordionItem
           :title="$t('CONVERSATION_SIDEBAR.ACCORDION.KANBAN')"
-          :is-open="isContactSidebarItemOpen('is_kanban_open')"
+          :is-open="isKanbanOpen"
           compact
+          keep-mounted
           :draggable="false"
-          @toggle="value => toggleSidebarUIState('is_kanban_open', value)"
+          @toggle="toggleKanban"
         >
-          <KanbanConversationCards :conversation-id="conversationId" />
+          <template #button>
+            <span class="ml-1 text-xs font-normal text-n-slate-10">
+              {{ $t('CONVERSATION_SIDEBAR.KANBAN.SEPARATOR') }}
+              {{
+                $t('CONVERSATION_SIDEBAR.KANBAN.COUNT', {
+                  count: kanbanSummary.count,
+                })
+              }}
+            </span>
+            <span
+              v-if="kanbanSummary.staleCount"
+              class="ml-1 inline-block size-2 rounded-full bg-n-ruby-9 align-middle"
+              :title="
+                $t('CONVERSATION_SIDEBAR.KANBAN.STALE_HINT', {
+                  count: kanbanSummary.staleCount,
+                })
+              "
+            />
+          </template>
+          <KanbanConversationCards
+            :conversation-id="conversationId"
+            :is-open="isKanbanOpen"
+            @summary="updateKanbanSummary"
+          />
         </AccordionItem>
       </div>
       <div class="conversation--actions">

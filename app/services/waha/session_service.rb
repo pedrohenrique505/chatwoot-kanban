@@ -1,54 +1,55 @@
 class Waha::SessionService
   pattr_initialize [:channel!]
 
-  WEBHOOK_EVENTS = %w[message.any message.ack message.edited message.revoked message.reaction session.status].freeze
+  # GOWS emits group delivery receipts and poll votes on their own events, so a
+  # channel that only subscribes to message.any/message.ack never receives them.
+  WEBHOOK_EVENTS = %w[message.any message.ack message.ack.group message.edited message.revoked message.reaction poll.vote session.status].freeze
+
+  # Stories, channels (newsletters) and broadcast lists are never represented in
+  # Chatwoot (see Waha::InboundEventPolicy), so WAHA drops them at the source
+  # instead of posting one webhook per story. Replies to them arrive on the
+  # contact's direct chat, which stays subscribed.
+  IGNORED_CHATS = { status: true, channels: true, broadcast: true }.freeze
 
   def start
-    create_session
-    http_client.request(:post, "sessions/#{channel.session_name}/start")
-  rescue StandardError => e
-    Rails.logger.error "[WAHA] Failed to start session #{channel.session_name}: #{e.message}"
+    safely('start') do
+      create_session
+      http_client.request(:post, "sessions/#{channel.session_name}/start")
+    end
   end
 
   # WAHA only applies session config on creation, so a session created before a
-  # config change keeps its old webhook until we PUT the update. Given the GET
-  # session response, this pushes our current webhook config only when it drifted,
-  # avoiding needless session restarts on every status poll.
+  # config change keeps its old config until we PUT the update. Given the GET
+  # session response, this pushes our current config only when it drifted,
+  # avoiding needless session restarts on every status poll. The PUT replaces the
+  # whole config, so it always carries every setting we own.
   def sync_webhook_config(session_info)
-    return if webhook_current?(session_info)
+    return if webhook_current?(session_info) && ignore_current?(session_info)
 
-    http_client.request(:put, "sessions/#{channel.session_name}", { config: { webhooks: [webhook_config] } })
-  rescue StandardError => e
-    Rails.logger.error "[WAHA] Failed to sync webhook for #{channel.session_name}: #{e.message}"
+    safely('sync webhook for') do
+      http_client.request(:put, "sessions/#{channel.session_name}", { config: session_config })
+    end
   end
 
   def qr_code
-    response = http_client.request(:get, "#{channel.session_name}/auth/qr?format=image")
-    return nil unless response.success?
+    safely('fetch QR for') do
+      response = http_client.request(:get, "#{channel.session_name}/auth/qr?format=image")
+      next nil unless response.success?
 
-    "data:image/png;base64,#{Base64.strict_encode64(response.body)}"
-  rescue StandardError => e
-    Rails.logger.error "[WAHA] Failed to fetch QR for #{channel.session_name}: #{e.message}"
-    nil
+      "data:image/png;base64,#{Base64.strict_encode64(response.body)}"
+    end
   end
 
   def status
-    http_client.get("sessions/#{channel.session_name}")
-  rescue StandardError => e
-    Rails.logger.error "[WAHA] Failed to fetch status for #{channel.session_name}: #{e.message}"
-    nil
+    safely('fetch status for') { http_client.get("sessions/#{channel.session_name}") }
   end
 
   def delete_session
-    http_client.request(:delete, "sessions/#{channel.session_name}")
-  rescue StandardError => e
-    Rails.logger.error "[WAHA] Failed to delete session #{channel.session_name}: #{e.message}"
+    safely('delete') { http_client.request(:delete, "sessions/#{channel.session_name}") }
   end
 
   def logout
-    http_client.request(:post, "sessions/#{channel.session_name}/logout")
-  rescue StandardError => e
-    Rails.logger.error "[WAHA] Failed to logout session #{channel.session_name}: #{e.message}"
+    safely('logout') { http_client.request(:post, "sessions/#{channel.session_name}/logout") }
   end
 
   # Forces a fresh QR by always logging out and restarting the session, so the QR
@@ -61,6 +62,16 @@ class Waha::SessionService
 
   private
 
+  # Every session call is best-effort: WAHA being unreachable must never take
+  # down the caller (a webhook, a poll, a channel destroy), so failures are
+  # logged and reported as nil.
+  def safely(action)
+    yield
+  rescue StandardError => e
+    Rails.logger.error "[WAHA] Failed to #{action} session #{channel.session_name}: #{e.message}"
+    nil
+  end
+
   # Creates the WAHA session with our webhook configured. WAHA's /start endpoint
   # requires the session to already exist, so this must run first. Idempotent:
   # re-creating an existing session returns 4xx which we safely ignore.
@@ -69,7 +80,11 @@ class Waha::SessionService
   end
 
   def session_payload
-    { name: channel.session_name, start: true, config: { webhooks: [webhook_config] } }
+    { name: channel.session_name, start: true, config: session_config }
+  end
+
+  def session_config
+    { webhooks: [webhook_config], ignore: IGNORED_CHATS }
   end
 
   def webhook_config
@@ -86,6 +101,13 @@ class Waha::SessionService
       webhook['url'] == channel.webhook_url &&
         WEBHOOK_EVENTS.all? { |event| Array(webhook['events']).include?(event) }
     end
+  end
+
+  def ignore_current?(session_info)
+    ignore = session_info.is_a?(Hash) ? session_info.dig('config', 'ignore') : nil
+    return false unless ignore.is_a?(Hash)
+
+    IGNORED_CHATS.all? { |key, value| ignore[key.to_s] == value }
   end
 
   def http_client

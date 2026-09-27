@@ -1,5 +1,9 @@
 {
   "CONVERSATION": {
+    "MESSAGES_GAP": "Algumas mensagens entre estas seções não foram carregadas",
+    "NEW_MESSAGES": "Novas mensagens",
+    "NEW_MESSAGE": "Nova mensagem",
+    "SCROLL_TO_BOTTOM": "Rolar até a mensagem mais recente",
     "SELECT_A_CONVERSATION": "Por favor, selecione uma conversa no painel da esquerda",
     "CSAT_REPLY_MESSAGE": "Por favor, classifique a conversa",
     "404": "Desculpe, não conseguimos encontrar a conversa. Por favor, tente novamente",
@@ -55,7 +59,7 @@
     "BOT_HANDOFF_ACTION": "Marcar como aberta e atribuir a você",
     "BOT_HANDOFF_REOPEN_ACTION": "Marcar conversa como aberta",
     "BOT_HANDOFF_SUCCESS": "Uma conversa foi atribuída a você",
-    "BOT_HANDOFF_ERROR": "Falha ao resolver conversas. Por favor, tente novamente.",
+    "BOT_HANDOFF_ERROR": "Falha ao finalizar conversas. Por favor, tente novamente.",
     "TWILIO_WHATSAPP_CAN_REPLY": "Você só pode responder a esta conversa usando um modelo de mensagem devido a",
     "TWILIO_WHATSAPP_24_HOURS_WINDOW": "Restrições de janela de mensagem de 24 horas",
     "OLD_INSTAGRAM_INBOX_REPLY_BANNER": "Esta conta do Instagram foi migrada para a nova caixa de entrada do canal do Instagram. Todas as novas mensagens serão mostradas lá. Você não poderá mais enviar mensagens desta conversa.",
@@ -82,7 +86,7 @@
     "NO_RESPONSE": "Sem resposta",
     "RESPONSE": "Resposta",
     "RATING_TITLE": "Classificação",
-    "FEEDBACK_TITLE": "Feedback",
+    "FEEDBACK_TITLE": "Comentários",
     "REPLY_MESSAGE_NOT_FOUND": "Mensagem não disponível",
     "CARD": {
       "SHOW_LABELS": "Mostrar etiquetas",
@@ -94,16 +98,22 @@
       "OUTGOING_CALL": "Chamada realizada",
       "CALL_IN_PROGRESS": "Chamada em andamento",
       "NO_ANSWER": "Sem resposta",
+      "NO_ANSWER_OUTBOUND_LABEL": "Sem resposta",
+      "NO_ANSWER_OUTBOUND_SUBTEXT": "O contato não atendeu",
       "MISSED_CALL": "Chamada perdida",
+      "MISSED_CALL_INBOUND_SUBTEXT": "Nenhum agente atendeu",
+      "MISSED_CALL_DECLINED_BY": "Recusada por {agentName}",
       "CALL_ENDED": "Chamada encerrada",
       "NOT_ANSWERED_YET": "Ainda não respondido",
+      "CALLING": "Chamando…",
       "THEY_ANSWERED": "Eles responderam",
       "YOU_ANSWERED": "Você respondeu",
       "AGENT_ANSWERED": "{agentName} respondeu",
-      "JOIN_CALL": "Entrar na chamada"
+      "JOIN_CALL": "Entrar na chamada",
+      "CALL_BACK": "Retornar a chamada"
     },
     "HEADER": {
-      "RESOLVE_ACTION": "Resolver",
+      "RESOLVE_ACTION": "Finalizar",
       "REOPEN_ACTION": "Reabrir",
       "OPEN_ACTION": "Abrir",
       "MORE_ACTIONS": "Mais ações",
@@ -121,7 +131,15 @@
         "RT": "RT {status}",
         "MISSED": "perdidas",
         "DUE": "venceu"
-      }
+      },
+      "SHOW_CONVERSATION_LIST": "Mostrar lista de conversas",
+      "HIDE_CONVERSATION_LIST": "Ocultar lista de conversas",
+      "WHATSAPP_CALL": "Iniciar chamada do WhatsApp",
+      "WHATSAPP_CALL_FAILED": "Não foi possível iniciar a chamada do WhatsApp.",
+      "VOICE_CALL": "Iniciar chamada",
+      "VOICE_CALL_FAILED": "Não foi possível iniciar a chamada.",
+      "WHATSAPP_CALL_PERMISSION_REQUESTED": "A solicitação de permissão para chamada foi enviada ao contato. Tente novamente quando ela for aceita.",
+      "WHATSAPP_CALL_PERMISSION_PENDING": "A solicitação de permissão para chamada já foi enviada recentemente. Tente novamente quando o contato aceitá-la."
     },
     "RESOLVE_DROPDOWN": {
       "MARK_PENDING": "Deixar pendente",
@@ -177,7 +195,7 @@
     },
     "CARD_CONTEXT_MENU": {
       "PENDING": "Deixar pendente",
-      "RESOLVED": "Marcar como resolvida",
+      "RESOLVED": "Marcar como finalizada",
       "MARK_AS_UNREAD": "Marcar como não lida",
       "MARK_AS_READ": "Marcar como lida",
       "REOPEN": "Reabrir conversa",
@@ -253,9 +271,11 @@
       "TIP_AUDIORECORDER_ICON": "Gravar áudio",
       "TIP_AUDIORECORDER_PERMISSION": "Permitir acesso ao áudio",
       "TIP_AUDIORECORDER_ERROR": "Não foi possível abrir o áudio",
+      "TIP_AUDIORECORDER_NO_DEVICE": "Nenhum microfone encontrado. Conecte um e verifique as configurações de som do seu sistema.",
       "DRAG_DROP": "Arraste e solte aqui para anexar",
       "START_AUDIO_RECORDING": "Iniciar gravação de áudio",
       "STOP_AUDIO_RECORDING": "Parar gravação de áudio",
+      "CANCEL_AUDIO_RECORDING": "Cancelar gravação de áudio",
       "COPILOT_THINKING": "O Copiloto está pensando",
       "EMAIL_HEAD": {
         "TO": "Para",
@@ -305,7 +325,9 @@
       "INSERT_IN_MESSAGE": "Inserir na mensagem",
       "SEND_TO_CUSTOMER": "Enviar ao cliente",
       "SENT_TO_CUSTOMER": "Resposta do assistente enviada ao cliente",
-      "SENT": "Enviada"
+      "SENT": "Enviada",
+      "LOAD_MORE": "Carregar mensagens anteriores",
+      "THINKING": "Pensando..."
     },
     "VISIBLE_TO_AGENTS": "Mensagem Privada: Apenas visível para você e seu time",
     "CHANGE_STATUS": "Estado da conversa mudou",
@@ -371,7 +393,11 @@
       "HANDLED_IN_ANOTHER_TAB": "Sendo atendida em outra aba",
       "REJECT_CALL": "Recusar",
       "JOIN_CALL": "Entrar na chamada",
-      "END_CALL": "Encerrar chamada"
+      "END_CALL": "Encerrar chamada",
+      "MUTE": "Silenciar microfone",
+      "UNMUTE": "Ativar microfone",
+      "VIEW_CHAT_HISTORY": "Ver histórico da conversa",
+      "GO_TO_CONVERSATION": "Ir para a conversa"
     }
   },
   "EMAIL_TRANSCRIPT": {
@@ -445,7 +471,11 @@
       "LOADING": "Carregando oportunidades",
       "EMPTY": "Nenhuma oportunidade vinculada a esta conversa",
       "ERROR": "Falha ao carregar oportunidades",
-      "ADD": "Criar novo card",
+      "COUNT": "{count} oportunidades",
+      "STALE_HINT": "{count} paradas",
+      "SEPARATOR": "·",
+      "NEW_OPPORTUNITY": "Nova oportunidade",
+      "ADD": "Criar novo cartão",
       "CREATE_TITLE": "Criar oportunidade",
       "BOARD": "Funil",
       "SUBJECT": "Assunto",
@@ -469,6 +499,18 @@
       "SELECT_STAGE": "Selecione uma etapa",
       "EMPTY_BOARDS": "Nenhum funil ativo disponível",
       "EMPTY_STAGES": "Nenhuma etapa ativa disponível",
+      "NO_ELIGIBLE_BOARDS": "Nenhum funil aceita esta caixa de entrada.",
+      "CREATE_IN_ANOTHER_BOARD": "Criar em outro funil",
+      "ALREADY_IN_BOARD": "A oportunidade {id} já existe neste funil para a mesma conversa e assunto.",
+      "OPEN_EXISTING": "Abrir",
+      "EDIT_DETAILS": "Editar detalhes",
+      "MOVE_BOARD": "Mover para outro funil",
+      "NO_OTHER_BOARDS": "Nenhum outro funil disponível.",
+      "OPEN_DETAILS": "Abrir detalhes",
+      "SET_DUE_DATE": "Definir data de vencimento",
+      "IN_STAGE_FOR": "{age} nesta etapa",
+      "STAGE_SELECT": "Alterar etapa",
+      "CLOSED_ON": "Fechado em {date}",
       "CREATE_ERROR": "Falha ao criar oportunidade",
       "CREATED": "Oportunidade criada",
       "CANCEL": "Cancelar",

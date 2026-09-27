@@ -1,7 +1,4 @@
-class Api::V1::Accounts::KanbanBoards::Cards::AssigneesController < Api::V1::Accounts::BaseController
-  before_action :fetch_kanban_board
-  before_action :fetch_kanban_card
-
+class Api::V1::Accounts::KanbanBoards::Cards::AssigneesController < Api::V1::Accounts::KanbanBoards::Cards::BaseController
   def index
     authorize @kanban_card, :show?
     fetch_assignees
@@ -12,21 +9,19 @@ class Api::V1::Accounts::KanbanBoards::Cards::AssigneesController < Api::V1::Acc
     authorize @kanban_card, :update?
     return render_unknown_assignees if unknown_assignee_ids.present?
 
-    @kanban_card.update_assignees!(assignee_ids)
+    previous_assignee_ids = @kanban_card.kanban_card_assignees.pluck(:user_id)
+    KanbanCard.transaction do
+      @kanban_card.update_assignees!(assignee_ids)
+      KanbanCards::RecordEventService.assignees_changed(
+        card: @kanban_card, from: previous_assignee_ids, to: assignee_ids, user: Current.user
+      )
+    end
     fetch_assignees
     fetch_assignable_users
     render :index
   end
 
   private
-
-  def fetch_kanban_board
-    @kanban_board = policy_scope(KanbanBoard).find(params[:kanban_board_id])
-  end
-
-  def fetch_kanban_card
-    @kanban_card = @kanban_board.kanban_cards.active.joins(:kanban_stage).merge(KanbanStage.active).find(params[:id])
-  end
 
   def fetch_assignees
     @assignees = @kanban_card.assignees

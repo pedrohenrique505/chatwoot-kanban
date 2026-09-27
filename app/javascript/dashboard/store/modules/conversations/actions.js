@@ -12,6 +12,7 @@ import {
 import messageReadActions from './actions/messageReadActions';
 import messageTranslateActions from './actions/messageTranslateActions';
 import * as Sentry from '@sentry/vue';
+import { isInboxIdVisibleInAllConversations } from 'dashboard/helper/inbox';
 import {
   handleVoiceCallCreated,
   handleVoiceCallUpdated,
@@ -21,6 +22,48 @@ import {
 // Tracks conversation ids currently being fetched after a message arrived for a
 // conversation missing from the store, so a burst of messages triggers a single fetch.
 const inFlightConversationFetches = new Set();
+const inFlightMessageGapLoads = new Map();
+const MESSAGE_GAP_BATCH_SIZE = 20;
+
+const messageIdsMatch = (firstId, secondId) =>
+  Number(firstId) === Number(secondId);
+
+const fetchConversationMessageGap = async (
+  { commit },
+  { conversationId, afterId, beforeId }
+) => {
+  if (messageIdsMatch(afterId, beforeId)) return;
+
+  const {
+    data: { payload = [] },
+  } = await MessageApi.getMessageWindow(conversationId, {
+    around: afterId,
+    before_limit: 0,
+    after_limit: MESSAGE_GAP_BATCH_SIZE,
+  });
+
+  const messagesAfterCursor = payload.filter(
+    message => !messageIdsMatch(message.id, afterId)
+  );
+  const gapEndIndex = messagesAfterCursor.findIndex(message =>
+    messageIdsMatch(message.id, beforeId)
+  );
+  const isGapFilled = gapEndIndex !== -1;
+  const messagesToMerge = isGapFilled
+    ? messagesAfterCursor.slice(0, gapEndIndex + 1)
+    : messagesAfterCursor;
+
+  if (!messagesToMerge.length) {
+    throw new Error('Unable to advance message gap loading');
+  }
+
+  commit(types.MERGE_CONVERSATION_MESSAGE_WINDOW, {
+    id: conversationId,
+    data: messagesToMerge,
+    messageGapBeforeId: isGapFilled ? null : beforeId,
+    expectedMessageGapBeforeId: beforeId,
+  });
+};
 
 export const hasMessageFailedWithExternalError = pendingMessage => {
   // This helper is used to check if the message has failed with an external error.
@@ -44,8 +87,8 @@ const shouldSkipAllConversationsUpsert = (state, rootGetters, conversation) => {
     return conversationInboxVisibility === false;
   }
 
-  const inbox = rootGetters?.['inboxes/getInbox']?.(conversation.inbox_id);
-  return inbox?.show_in_all_conversations === false;
+  const inboxes = rootGetters?.['inboxes/getInboxes'] || [];
+  return !isInboxIdVisibleInAllConversations(inboxes, conversation.inbox_id);
 };
 
 // actions
@@ -101,8 +144,8 @@ const actions = {
     }
   },
 
-  emptyAllConversations({ commit }) {
-    commit(types.EMPTY_ALL_CONVERSATION);
+  emptyAllConversations({ commit }, { keepSelected = false } = {}) {
+    commit(types.EMPTY_ALL_CONVERSATION, { keepSelected });
   },
 
   clearSelectedState({ commit }) {
@@ -142,6 +185,23 @@ const actions = {
       id: conversationId,
       data: payload,
     });
+  },
+
+  loadConversationMessageGap(context, payload) {
+    const { conversationId } = payload;
+    const requestKey = String(conversationId);
+    const existingRequest = inFlightMessageGapLoads.get(requestKey);
+    if (existingRequest) return existingRequest;
+
+    const request = fetchConversationMessageGap(context, payload).finally(
+      () => {
+        if (inFlightMessageGapLoads.get(requestKey) === request) {
+          inFlightMessageGapLoads.delete(requestKey);
+        }
+      }
+    );
+    inFlightMessageGapLoads.set(requestKey, request);
+    return request;
   },
 
   fetchAllAttachments: async ({ commit }, conversationId) => {

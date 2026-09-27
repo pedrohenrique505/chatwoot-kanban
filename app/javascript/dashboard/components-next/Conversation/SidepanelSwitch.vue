@@ -6,8 +6,7 @@ import { computed } from 'vue';
 import { FEATURE_FLAGS } from 'dashboard/featureFlags';
 import { useMapGetter } from 'dashboard/composables/store';
 import { useKeyboardEvents } from 'dashboard/composables/useKeyboardEvents';
-
-const { updateUISettings } = useUISettings();
+import { useContactSidebar } from 'dashboard/composables/useEmbeddedConversation';
 
 const currentAccountId = useMapGetter('getCurrentAccountId');
 const isFeatureEnabledonAccount = useMapGetter(
@@ -19,30 +18,14 @@ const showCopilotTab = computed(() =>
 );
 
 const { uiSettings } = useUISettings();
-const isContactSidebarOpen = computed(
-  () => uiSettings.value.is_contact_sidebar_open
-);
+const { toggleContactSidebar, openCopilotPanel } = useContactSidebar();
 const isCopilotPanelOpen = computed(
   () => uiSettings.value.is_copilot_panel_open
 );
 
-const toggleConversationSidebarToggle = () => {
-  updateUISettings({
-    is_contact_sidebar_open: !isContactSidebarOpen.value,
-    is_copilot_panel_open: false,
-  });
-};
-
-const handleCopilotSidebarToggle = () => {
-  updateUISettings({
-    is_contact_sidebar_open: false,
-    is_copilot_panel_open: true,
-  });
-};
-
 const keyboardEvents = {
   'Alt+KeyO': {
-    action: toggleConversationSidebarToggle,
+    action: toggleContactSidebar,
   },
 };
 useKeyboardEvents(keyboardEvents);
@@ -65,7 +48,7 @@ useKeyboardEvents(keyboardEvents);
             isCopilotPanelOpen,
         }"
         icon="i-woot-captain"
-        @click="handleCopilotSidebarToggle"
+        @click="openCopilotPanel"
       />
     </ButtonGroup>
   </div>

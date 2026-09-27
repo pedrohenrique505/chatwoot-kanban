@@ -18,6 +18,7 @@ import ChannelLeaf from './ChannelLeaf.vue';
 import ChannelIcon from 'next/icon/ChannelIcon.vue';
 import SidebarAccountSwitcher from './SidebarAccountSwitcher.vue';
 import Logo from 'next/icon/Logo.vue';
+import Button from 'dashboard/components-next/button/Button.vue';
 
 const props = defineProps({
   isMobileSidebarOpen: {
@@ -162,6 +163,15 @@ const onResizeHandleDoubleClick = () => {
   if (isCollapsed.value) snapToExpanded();
   else snapToCollapsed();
 };
+const toggleSidebar = () => {
+  if (isCollapsed.value) snapToExpanded();
+  else snapToCollapsed();
+};
+
+const sidebarToggleLabel = computed(() => {
+  if (isEffectivelyCollapsed.value) return t('SIDEBAR.EXPAND');
+  return t('SIDEBAR.COLLAPSE');
+});
 
 // Support both mouse and touch events
 useEventListener(document, 'mousemove', onResizeMove);
@@ -308,6 +318,11 @@ const newReportRoutes = () => [
     to: accountScopedRoute('team_reports_index'),
     activeOn: ['team_reports_show'],
   },
+  {
+    name: 'Reports Kanban',
+    label: t('SIDEBAR.REPORTS_KANBAN'),
+    to: accountScopedRoute('kanban_reports'),
+  },
 ];
 
 const reportRoutes = computed(() => newReportRoutes());
@@ -324,6 +339,12 @@ const menuItems = computed(() => {
           label: t('SIDEBAR.ALL_CONVERSATIONS'),
           activeOn: ['inbox_conversation'],
           to: accountScopedRoute('home'),
+        },
+        {
+          name: 'Mine',
+          label: t('SIDEBAR.MY_CONVERSATIONS'),
+          activeOn: ['conversation_through_mine'],
+          to: accountScopedRoute('conversation_mine'),
         },
         {
           name: 'Email',
@@ -426,7 +447,7 @@ const menuItems = computed(() => {
         ...kanbanBoards.value.map(board => ({
           name: `Kanban Board ${board.id}`,
           label: board.name,
-          activeOn: ['kanban_board_show', 'kanban_board_settings'],
+          activeOn: ['kanban_board_show', 'kanban_board_edit_form'],
           to: accountScopedRoute('kanban_board_show', {
             boardId: board.id,
           }),
@@ -935,6 +956,30 @@ const menuItems = computed(() => {
           isEffectivelyCollapsed
         "
       />
+      <div
+        class="hidden md:flex w-full"
+        :class="isEffectivelyCollapsed ? 'px-1 justify-center' : 'px-2'"
+      >
+        <Button
+          ghost
+          slate
+          sm
+          :justify="isEffectivelyCollapsed ? 'center' : 'start'"
+          :label="isEffectivelyCollapsed ? '' : sidebarToggleLabel"
+          :class="
+            isEffectivelyCollapsed ? '' : 'w-full !px-1.5 text-n-slate-11'
+          "
+          :icon="
+            isEffectivelyCollapsed
+              ? 'i-lucide-panel-left-open'
+              : 'i-lucide-panel-left-close'
+          "
+          :title="sidebarToggleLabel"
+          :aria-label="sidebarToggleLabel"
+          data-sidebar-toggle
+          @click="toggleSidebar"
+        />
+      </div>
       <div
         class="px-1 py-1.5 flex-shrink-0 flex w-full z-50 gap-2 items-center border-t border-n-weak shadow-[0px_-2px_4px_0px_rgba(27,28,29,0.02)]"
         :class="isEffectivelyCollapsed ? 'justify-center' : 'justify-between'"

@@ -17,6 +17,8 @@ import {
 } from 'date-fns';
 
 import Popover from 'dashboard/components-next/popover/Popover.vue';
+import Select from 'dashboard/components-next/select/Select.vue';
+import { MENU_SURFACE_CLASSES } from './menuClasses';
 
 const props = defineProps({
   label: {
@@ -30,6 +32,14 @@ const props = defineProps({
   clearLabel: {
     type: String,
     required: true,
+  },
+  compact: {
+    type: Boolean,
+    default: false,
+  },
+  disabled: {
+    type: Boolean,
+    default: false,
   },
 });
 
@@ -94,6 +104,9 @@ const yearOptions = computed(() => {
 
   return Array.from({ length: 17 }, (_, index) => startYear + index);
 });
+const yearSelectOptions = computed(() =>
+  yearOptions.value.map(year => ({ value: year, label: String(year) }))
+);
 const calendarDays = computed(() => {
   const start = startOfWeek(startOfMonth(currentMonth.value), {
     weekStartsOn: 0,
@@ -119,15 +132,18 @@ watch(
   { immediate: true }
 );
 
+// Emit the new value directly: defineModel only writes back on the next parent
+// render, so reading modelValue here would still give the previous value.
 const selectDate = (date, hide) => {
-  modelValue.value = toDateValue(date);
-  emit('change', modelValue.value);
+  const value = toDateValue(date);
+  modelValue.value = value;
+  emit('change', value);
   hide();
 };
 
 const clearDate = () => {
   modelValue.value = '';
-  emit('change', modelValue.value);
+  emit('change', '');
 };
 
 const setCurrentMonth = value => {
@@ -153,28 +169,41 @@ const dayClasses = day => ({
 </script>
 
 <template>
-  <div class="grid gap-1.5 [&>span]:w-full">
+  <div :class="compact ? 'flex min-w-0' : 'grid gap-1.5 [&>span]:w-full'">
     <span v-if="label" class="text-sm font-medium text-n-slate-12">
       {{ label }}
     </span>
 
-    <Popover align="start" disable-mobile-view :show-content-border="false">
-      <div class="flex w-full gap-2">
+    <Popover align="start" disable-mobile-view>
+      <div :class="compact ? 'flex min-w-0 gap-0.5' : 'flex w-full gap-2'">
         <button
           type="button"
-          class="inline-flex min-h-10 flex-1 items-center gap-2 rounded-md border border-n-weak bg-n-surface-1 px-3 py-2 text-left text-sm text-n-slate-12 outline-none hover:bg-n-alpha-2 focus:border-n-brand"
+          class="inline-flex items-center gap-1.5 rounded-md text-left outline-none hover:bg-n-alpha-2"
+          :class="[
+            compact
+              ? 'h-7 w-auto min-w-0 px-1.5 py-1 text-xs text-n-slate-11 hover:text-n-slate-12 focus-visible:ring-1 focus-visible:ring-n-brand'
+              : 'min-h-10 flex-1 border border-n-weak bg-n-surface-1 px-3 py-2 text-sm text-n-slate-12 focus:border-n-brand',
+          ]"
+          :aria-label="props.label || props.placeholder"
+          :disabled="disabled"
         >
-          <i class="i-lucide-calendar size-4 flex-shrink-0 text-n-slate-11" />
-          <span class="min-w-0 flex-1 truncate">{{ buttonLabel }}</span>
+          <i class="i-lucide-calendar size-3 flex-shrink-0 text-n-slate-11" />
+          <span class="min-w-0 truncate">{{ buttonLabel }}</span>
           <i
-            class="i-lucide-chevron-down size-4 flex-shrink-0 text-n-slate-11"
+            class="i-lucide-chevron-down size-3 flex-shrink-0 text-n-slate-11"
           />
         </button>
         <button
           v-if="selectedDate"
           type="button"
-          class="flex min-h-10 w-10 flex-shrink-0 items-center justify-center rounded-md border border-n-weak bg-n-surface-1 text-n-slate-11 hover:bg-n-alpha-2 hover:text-n-slate-12"
+          :class="
+            compact
+              ? 'size-7'
+              : 'min-h-10 w-10 border border-n-weak bg-n-surface-1'
+          "
+          class="flex flex-shrink-0 items-center justify-center rounded-md text-n-slate-11 hover:bg-n-alpha-2 hover:text-n-slate-12"
           :aria-label="clearLabel"
+          :disabled="disabled"
           @click.stop="clearDate"
         >
           <i class="i-lucide-x size-4" />
@@ -182,45 +211,40 @@ const dayClasses = day => ({
       </div>
 
       <template #content="{ hide }">
-        <div
-          class="w-80 select-none rounded-xl border border-n-strong bg-n-alpha-3 p-3 shadow-xl backdrop-blur-[100px]"
-        >
+        <div class="w-80 select-none" :class="[MENU_SURFACE_CLASSES]">
           <div class="mb-3 flex items-center gap-2">
             <button
               type="button"
               class="flex size-8 flex-shrink-0 items-center justify-center rounded-md text-n-slate-11 hover:bg-n-alpha-2 hover:text-n-slate-12"
+              :disabled="disabled"
               @click="currentMonth = addMonths(currentMonth, -1)"
             >
               <i class="i-lucide-chevron-left size-4" />
             </button>
 
-            <select
-              class="min-h-8 flex-1 rounded-md border border-n-weak bg-n-surface-1 px-2 text-sm font-medium text-n-slate-12 outline-none focus:border-n-brand"
-              :value="currentMonth.getMonth()"
-              @change="setCurrentMonth($event.target.value)"
-            >
-              <option
-                v-for="month in monthOptions"
-                :key="month.value"
-                :value="month.value"
-              >
-                {{ month.label }}
-              </option>
-            </select>
+            <Select
+              :model-value="currentMonth.getMonth()"
+              :options="monthOptions"
+              :disabled="disabled"
+              full-width
+              class="flex-1"
+              @update:model-value="setCurrentMonth"
+            />
 
-            <select
-              class="min-h-8 w-24 rounded-md border border-n-weak bg-n-surface-1 px-2 text-sm font-medium text-n-slate-12 outline-none focus:border-n-brand"
-              :value="currentMonth.getFullYear()"
-              @change="setCurrentYear($event.target.value)"
-            >
-              <option v-for="year in yearOptions" :key="year" :value="year">
-                {{ year }}
-              </option>
-            </select>
+            <div class="w-28 flex-shrink-0">
+              <Select
+                :model-value="currentMonth.getFullYear()"
+                :options="yearSelectOptions"
+                :disabled="disabled"
+                full-width
+                @update:model-value="setCurrentYear"
+              />
+            </div>
 
             <button
               type="button"
               class="flex size-8 flex-shrink-0 items-center justify-center rounded-md text-n-slate-11 hover:bg-n-alpha-2 hover:text-n-slate-12"
+              :disabled="disabled"
               @click="currentMonth = addMonths(currentMonth, 1)"
             >
               <i class="i-lucide-chevron-right size-4" />
@@ -241,6 +265,7 @@ const dayClasses = day => ({
               type="button"
               class="flex h-9 items-center justify-center rounded-lg text-sm font-medium"
               :class="dayClasses(day)"
+              :disabled="disabled"
               @click="selectDate(day, hide)"
             >
               {{ day.getDate() }}

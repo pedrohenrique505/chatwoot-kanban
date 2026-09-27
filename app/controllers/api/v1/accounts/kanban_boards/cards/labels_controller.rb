@@ -1,7 +1,4 @@
-class Api::V1::Accounts::KanbanBoards::Cards::LabelsController < Api::V1::Accounts::BaseController
-  before_action :fetch_kanban_board
-  before_action :fetch_kanban_card
-
+class Api::V1::Accounts::KanbanBoards::Cards::LabelsController < Api::V1::Accounts::KanbanBoards::Cards::BaseController
   def index
     authorize @kanban_card, :show?
     fetch_labels
@@ -11,20 +8,18 @@ class Api::V1::Accounts::KanbanBoards::Cards::LabelsController < Api::V1::Accoun
     authorize @kanban_card, :update?
     return render_unknown_labels if unknown_label_titles.present?
 
-    @kanban_card.update_labels(label_titles)
+    previous_label_titles = @kanban_card.label_list.to_a
+    KanbanCard.transaction do
+      @kanban_card.update_labels(label_titles)
+      KanbanCards::RecordEventService.labels_changed(
+        card: @kanban_card, from: previous_label_titles, to: label_titles, user: Current.user
+      )
+    end
     fetch_labels
     render :index
   end
 
   private
-
-  def fetch_kanban_board
-    @kanban_board = policy_scope(KanbanBoard).find(params[:kanban_board_id])
-  end
-
-  def fetch_kanban_card
-    @kanban_card = @kanban_board.kanban_cards.active.joins(:kanban_stage).merge(KanbanStage.active).find(params[:id])
-  end
 
   def fetch_labels
     @labels = Current.account.labels.where(title: @kanban_card.label_list)

@@ -31,6 +31,70 @@
 
 en:
   hello: 'Hello world'
+  kanban:
+    board_templates:
+      blank:
+        name: 'Blank'
+        description: 'Just the essentials: one stage plus Won and Lost.'
+        stages:
+          entry: 'Inbox'
+          won: 'Won'
+          lost: 'Lost'
+      sales:
+        name: 'Sales'
+        description: 'From first contact to closing the deal.'
+        stages:
+          new_contact: 'New contact'
+          qualification: 'Qualification'
+          quote_sent: 'Quote sent'
+          negotiation: 'Negotiation'
+          won: 'Won'
+          lost: 'Lost'
+        lost_reasons:
+          price: 'Price'
+          delivery_time: 'Delivery time'
+          out_of_stock: 'Out of stock'
+          bought_elsewhere: 'Bought elsewhere'
+          no_reply: 'No reply'
+      tech_support:
+        name: 'Tech support'
+        description: 'From equipment intake to handing it back.'
+        stages:
+          received: 'Received'
+          diagnosis: 'Diagnosis'
+          awaiting_approval: 'Awaiting approval'
+          in_repair: 'In repair'
+          ready_for_pickup: 'Ready for pickup'
+          delivered: 'Delivered'
+          cancelled: 'Cancelled'
+        lost_reasons:
+          quote_refused: 'Quote refused'
+          unrepairable: 'Beyond repair'
+          gave_up: 'Customer gave up'
+          abandoned: 'Abandoned equipment'
+        custom_fields:
+          service_order: 'Service order #'
+          equipment: 'Equipment'
+          device_password: 'Device password'
+          promised_date: 'Promised date'
+      quotes:
+        name: 'Quotes and projects'
+        description: 'For larger sales, business customers and custom builds.'
+        stages:
+          request: 'Request'
+          assessment: 'Assessment'
+          proposal_sent: 'Proposal sent'
+          follow_up: 'Follow-up'
+          closed: 'Closed'
+          refused: 'Refused'
+        lost_reasons:
+          price: 'Price'
+          scope_changed: 'Scope changed'
+          postponed: 'Postponed'
+          competitor: 'Competitor'
+        custom_fields:
+          company: 'Company'
+          valid_until: 'Valid until'
   inbox:
     reauthorization:
       success: 'Channel reauthorized successfully'
@@ -57,6 +121,14 @@ en:
       presence: must not be blank
     webhook:
       invalid: Invalid events
+    kanban_card_field_value:
+      value:
+        invalid_for_field_type: 'is invalid for "%{field_key}" (expected a valid %{field_type} value)'
+        multiple_not_allowed: 'for "%{field_key}" does not accept multiple values'
+    kanban_card_note:
+      attachments:
+        too_many: 'Up to 5 files per note.'
+        too_large: 'Each file must be 20MB or smaller.'
     signup:
       disposable_email: We do not allow disposable emails
       blocked_domain: This domain is not allowed. If you believe this is a mistake, please contact support.
@@ -107,6 +179,10 @@ en:
       search:
         query_missing: Specify search string with parameter q
     messages:
+      waha_connection_conflict: 'This WAHA server and session are used by multiple existing inboxes. Update one inbox before using this connection.'
+      waha_connection_in_use: 'This WAHA server and session are already connected to another inbox.'
+      waha_url_invalid: 'must be a valid HTTP(S) WAHA server URL without credentials or query parameters'
+      waha_webhook_session_mismatch: 'The webhook session does not match this WAHA inbox.'
       search:
         time_range_limit_exceeded: 'Search is limited to the last %{days} days'
     categories:
@@ -265,6 +341,73 @@ en:
       deleted: This message was deleted
       waha_edit_not_allowed: This message can no longer be edited
       waha_react_not_allowed: This message cannot be reacted to
+      waha_media_pending: 'Media is being downloaded'
+      waha_media_unavailable: 'Media unavailable: the download failed after several attempts'
+      waha_call:
+        event: 'WhatsApp %{direction} %{kind} call %{result}%{duration}'
+        direction:
+          incoming: 'incoming'
+        kind:
+          voice: 'voice'
+          video: 'video'
+        result:
+          received: 'received'
+          accepted: 'accepted'
+          rejected: 'ended'
+        duration: ' (%{duration}s)'
+      waha_location:
+        live: '📡 Live location'
+      waha_contacts:
+        header:
+          one: '👤 Shared contact'
+          other: '👤 Shared contacts'
+        name: '🪪 %{name}'
+        phone: '📞 %{phone}'
+        unnamed: 'Unnamed contact'
+      waha_poll:
+        header: '📊 Poll'
+        selectable_options:
+          one: 'Select one option'
+          other: 'Select up to %{count} options'
+        option: '• %{option}'
+        observed_votes: 'Observed votes'
+        observed_vote:
+          one: '• %{option} — 1 vote'
+          other: '• %{option} — %{count} votes'
+      waha_list:
+        header: '📋 List'
+        response: 'List selection'
+        section: '%{title}'
+        option: '• %{title}%{description}'
+        selected: 'Selected: %{option}'
+      waha_event:
+        header: '📅 Event'
+        canceled: 'Canceled'
+        starts_at: 'Starts: %{time}'
+        ends_at: 'Ends: %{time}'
+        location: 'Location: %{location}'
+      waha_pix:
+        header: '💰 Pix payment'
+        merchant: 'Merchant: %{name}'
+        key: 'Pix key: %{key}'
+        key_with_type: 'Pix key: %{key} (%{key_type})'
+        amount: 'Amount: %{amount}'
+        reference: 'Reference: %{reference}'
+      waha_facebook_ad:
+        header: '📣 Facebook/Instagram ad'
+        media: 'Media: %{url}'
+        source: 'Source: %{url}'
+      waha_album:
+        header: '🖼️ Album'
+        photos:
+          one: '%{count} photo'
+          other: '%{count} photos'
+        videos:
+          one: '%{count} video'
+          other: '%{count} videos'
+      waha_status_reply:
+        quoted_author: '%{author} · Status'
+        quoted_author_unknown: 'Status'
       whatsapp:
         list_button_label: 'Choose an item'
         call_permission_request_body: 'We would like to call you regarding your conversation.'

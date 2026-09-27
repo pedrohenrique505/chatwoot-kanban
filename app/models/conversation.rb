@@ -126,7 +126,7 @@ class Conversation < ApplicationRecord
 
   has_many :mentions, dependent: :destroy_async
   has_many :messages, dependent: :destroy_async, autosave: true
-  has_many :conversation_assistant_messages, dependent: :destroy_async
+  has_many :conversation_assistant_messages, dependent: :destroy
   has_one :csat_survey_response, dependent: :destroy_async
   has_many :conversation_participants, dependent: :destroy_async
   has_many :conversation_access_users, dependent: :destroy_async
@@ -213,6 +213,14 @@ class Conversation < ApplicationRecord
   def unread_incoming_messages
     unread_messages.where(account_id: account_id).incoming.last(10)
   end
+
+  def unread_incoming_messages_count
+    return @preloaded_unread_incoming_messages_count if defined?(@preloaded_unread_incoming_messages_count)
+
+    unread_incoming_messages.count
+  end
+
+  attr_writer :preloaded_unread_incoming_messages_count
 
   def cached_label_list_array
     (cached_label_list || '').split(',').map(&:strip)

@@ -1,9 +1,7 @@
 class SearchService
   pattr_initialize [:current_user!, :current_account!, :params!, :search_type!]
 
-  def account_user
-    @account_user ||= current_account.account_users.find_by(user: current_user)
-  end
+  def account_user = @account_user ||= current_account.account_users.find_by(user: current_user)
 
   def perform
     case search_type
@@ -42,6 +40,7 @@ class SearchService
                           .not_archived
                           .joins('INNER JOIN contacts ON conversations.contact_id = contacts.id')
                           .where(search_sql, search: "%#{search_query}%")
+    conversations_query = apply_inbox_id_filter(conversations_query)
 
     if current_account.feature_enabled?('advanced_search')
       conversations_query = apply_time_filter(conversations_query,
@@ -112,7 +111,9 @@ class SearchService
   end
 
   def message_base_query
-    query = current_account.messages.includes(conversation: :contact)
+    query = current_account.messages.includes({ sender: { avatar_attachment: :blob } },
+                                              { attachments: { file_attachment: :blob } },
+                                              { conversation: { contact: { avatar_attachment: :blob } } })
                            .where('created_at >= ?', 3.months.ago)
                            .where.not(message_type: :activity)
     query = query.where(inbox_id: accessable_inbox_ids) unless should_skip_inbox_filtering?
@@ -122,11 +123,11 @@ class SearchService
   end
 
   def apply_message_filters(query)
+    query = apply_inbox_id_filter(query)
     return query unless current_account.feature_enabled?('advanced_search')
 
     query = apply_time_filter(query, 'messages.created_at')
-    query = apply_sender_filter(query)
-    apply_inbox_id_filter(query)
+    apply_sender_filter(query)
   end
 
   def apply_sender_filter(query)
@@ -164,9 +165,9 @@ class SearchService
     account_user.administrator? || user_has_access_to_all_inboxes?
   end
 
-  def user_has_access_to_all_inboxes?
-    accessable_inbox_ids.sort == current_account.inboxes.pluck(:id).sort
-  end
+  def all_account_inbox_ids = @all_account_inbox_ids ||= current_account.inboxes.pluck(:id)
+
+  def user_has_access_to_all_inboxes? = accessable_inbox_ids.sort == all_account_inbox_ids.sort
 
   def use_gin_search = current_account.feature_enabled?('search_with_gin')
 

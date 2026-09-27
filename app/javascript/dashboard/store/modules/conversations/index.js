@@ -54,14 +54,26 @@ export const mutations = {
           allMessagesLoaded: existingConversation.allMessagesLoaded,
           messages: existingConversation.messages,
           dataFetched: existingConversation.dataFetched,
+          messageGapBeforeId: existingConversation.messageGapBeforeId,
         };
       }
     });
     _state.allConversations = newAllConversations;
   },
-  [types.EMPTY_ALL_CONVERSATION](_state) {
-    _state.allConversations = [];
-    _state.selectedChatId = null;
+  [types.EMPTY_ALL_CONVERSATION](_state, { keepSelected = false } = {}) {
+    // An embedded conversation is the whole point of the view built around it,
+    // so reloading the list next to it must not drop the conversation itself:
+    // the list getters still filter it out when it doesn't match the filters.
+    const keptConversations =
+      keepSelected && _state.selectedChatId
+        ? _state.allConversations.filter(
+            conversation => conversation.id === _state.selectedChatId
+          )
+        : [];
+    _state.allConversations = keptConversations;
+    if (!keptConversations.length) {
+      _state.selectedChatId = null;
+    }
   },
   [types.SET_ALL_MESSAGES_LOADED](_state, conversationId) {
     const chat = getConversationById(_state)(conversationId);
@@ -93,10 +105,10 @@ export const mutations = {
     const [chat] = _state.allConversations.filter(c => c.id === id);
     if (!chat) return;
     chat.messages = data;
-    chat.messageGapBeforeId = null;
   },
 
-  [types.MERGE_CONVERSATION_MESSAGE_WINDOW](_state, { id, data }) {
+  [types.MERGE_CONVERSATION_MESSAGE_WINDOW](_state, payload) {
+    const { id, data } = payload;
     const chat = getConversationById(_state)(id);
     if (!chat || !data.length) return;
 
@@ -123,19 +135,29 @@ export const mutations = {
       }
     );
 
-    let gapBeforeMessageId = null;
-    if (!hasOverlap && chat.messages.length > 0) {
-      for (let i = 1; i < sortedMessages.length; i += 1) {
-        const prevInWindow = windowIds.has(sortedMessages[i - 1].id);
-        const currInWindow = windowIds.has(sortedMessages[i].id);
-        if (prevInWindow !== currInWindow) {
-          gapBeforeMessageId = sortedMessages[i].id;
-          break;
+    if (Object.prototype.hasOwnProperty.call(payload, 'messageGapBeforeId')) {
+      const isCurrentGap =
+        payload.expectedMessageGapBeforeId === undefined ||
+        Number(chat.messageGapBeforeId) ===
+          Number(payload.expectedMessageGapBeforeId);
+      if (isCurrentGap) {
+        chat.messageGapBeforeId = payload.messageGapBeforeId;
+      }
+    } else {
+      let gapBeforeMessageId = null;
+      if (!hasOverlap && chat.messages.length > 0) {
+        for (let i = 1; i < sortedMessages.length; i += 1) {
+          const prevInWindow = windowIds.has(sortedMessages[i - 1].id);
+          const currInWindow = windowIds.has(sortedMessages[i].id);
+          if (prevInWindow !== currInWindow) {
+            gapBeforeMessageId = sortedMessages[i].id;
+            break;
+          }
         }
       }
+      chat.messageGapBeforeId = gapBeforeMessageId;
     }
 
-    chat.messageGapBeforeId = gapBeforeMessageId;
     chat.messages.splice(0, chat.messages.length, ...sortedMessages);
   },
 
@@ -266,7 +288,7 @@ export const mutations = {
       const { conversation: { unread_count: unreadCount = 0 } = {} } = message;
       chat.unread_count = unreadCount;
       if (selectedChatId === conversationId) {
-        emitter.emit(BUS_EVENTS.SCROLL_TO_MESSAGE);
+        emitter.emit(BUS_EVENTS.MESSAGE_ADDED, { message });
       }
     }
   },
@@ -309,12 +331,14 @@ export const mutations = {
         ...updates,
       };
       if (_state.selectedChatId === conversation.id) {
-        emitter.emit(BUS_EVENTS.SCROLL_TO_MESSAGE);
+        // no message payload: keeps the list pinned to the bottom when the user
+        // is already there, without counting towards the new messages pill
+        emitter.emit(BUS_EVENTS.MESSAGE_ADDED);
       }
     } else {
       const { conversationType } = _state.conversationFilters || {};
-      const { MENTION, PARTICIPATING } = wootConstants.CONVERSATION_TYPE;
-      if (![MENTION, PARTICIPATING].includes(conversationType)) {
+      const { MENTION } = wootConstants.CONVERSATION_TYPE;
+      if (conversationType !== MENTION) {
         _state.allConversations.push(conversation);
       }
     }

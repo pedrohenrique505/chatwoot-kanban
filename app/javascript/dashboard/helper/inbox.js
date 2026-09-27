@@ -38,6 +38,20 @@ export const getVoiceCallProvider = inbox => {
 
 export const isVoiceCallEnabled = inbox => getVoiceCallProvider(inbox) !== null;
 
+// An inbox only drops out of the All conversations list by explicitly setting
+// the flag to false, so anything else counts as visible.
+export const isInboxVisibleInAllConversations = inbox =>
+  inbox?.show_in_all_conversations !== false;
+
+// An inbox missing from the list is treated as hidden: the agent has no access
+// to it, so it must not surface in All conversations.
+export const isInboxIdVisibleInAllConversations = (inboxes, inboxId) =>
+  inboxes.some(
+    inbox =>
+      Number(inbox.id) === Number(inboxId) &&
+      isInboxVisibleInAllConversations(inbox)
+  );
+
 export const TWILIO_CHANNEL_MEDIUM = {
   WHATSAPP: 'whatsapp',
   SMS: 'sms',
@@ -74,6 +88,13 @@ const INBOX_ICON_MAP_LINE = {
 };
 
 const DEFAULT_ICON_LINE = 'i-ri-chat-1-line';
+
+// vue-i18n returns the key itself when a translation is missing, so fall back to
+// the raw value — WAHA emits session/event names we may not have a label for.
+export const translateOrRaw = (t, key, raw) => {
+  const translated = t(key);
+  return translated === key ? raw : translated;
+};
 
 export const isApiWhatsappInbox = (type, name = '') => {
   return (

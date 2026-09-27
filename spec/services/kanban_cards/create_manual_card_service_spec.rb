@@ -31,6 +31,29 @@ RSpec.describe KanbanCards::CreateManualCardService do
       expect(KanbanCard.last).to be_valid
     end
 
+    it 'uses an explicit selected conversation instead of the latest matching conversation' do
+      selected_conversation = create(:conversation, account: account, contact: contact, inbox: inbox, last_activity_at: 1.day.ago)
+      create(:conversation, account: account, contact: contact, inbox: inbox, last_activity_at: Time.current)
+
+      card = build_service(conversation: selected_conversation).perform!
+
+      expect(card.conversation).to eq(selected_conversation)
+    end
+
+    it 'rejects an explicit conversation from a different contact' do
+      selected_conversation = create(:conversation, account: account, inbox: inbox)
+
+      expect { build_service(conversation: selected_conversation).perform! }
+        .to raise_validation_error('Conversation must belong to contact')
+    end
+
+    it 'rejects an explicit conversation from a different inbox' do
+      selected_conversation = create(:conversation, account: account, contact: contact)
+
+      expect { build_service(conversation: selected_conversation).perform! }
+        .to raise_validation_error('Conversation must use selected inbox')
+    end
+
     it 'emits kanban.card.created with a compact payload' do
       allow(Rails.configuration.dispatcher).to receive(:dispatch)
 
@@ -58,38 +81,26 @@ RSpec.describe KanbanCards::CreateManualCardService do
     end
 
     it 'inserts the card at the top of the selected stage' do
-      create(:kanban_card, account: account, kanban_board: kanban_board, kanban_stage: kanban_stage, position: 1)
+      first_card = create(:kanban_card, account: account, kanban_board: kanban_board, kanban_stage: kanban_stage, position: 1000)
 
       card = service.perform!
 
-      expect(card.position).to eq(1)
+      expect(card.position).to be < first_card.position
+      expect(KanbanCard.stage_active_cards(kanban_board, kanban_stage).pluck(:id)).to eq([card.id, first_card.id])
     end
 
-    it 'shifts existing active cards down in the selected stage' do
-      first_card = create(:kanban_card, account: account, kanban_board: kanban_board, kanban_stage: kanban_stage, position: 1)
-      second_card = create(:kanban_card, account: account, kanban_board: kanban_board, kanban_stage: kanban_stage, position: 2)
+    it 'leaves the cards already in the stage where they are' do
+      original_time = Time.zone.parse('2026-01-01 12:00:00 UTC')
+      first_card = create(:kanban_card, account: account, kanban_board: kanban_board, kanban_stage: kanban_stage, position: 1000)
+      second_card = create(
+        :kanban_card, account: account, kanban_board: kanban_board, kanban_stage: kanban_stage, position: 2000, updated_at: original_time
+      )
 
       service.perform!
 
-      expect(first_card.reload.position).to eq(2)
-      expect(second_card.reload.position).to eq(3)
-    end
-
-    it 'updates updated_at for mechanically shifted cards' do
-      shifted_card = create(
-        :kanban_card,
-        account: account,
-        kanban_board: kanban_board,
-        kanban_stage: kanban_stage,
-        position: 1,
-        updated_at: 2.days.ago
-      )
-
-      travel_to(Time.zone.parse('2026-01-01 12:00:00 UTC')) do
-        service.perform!
-      end
-
-      expect(shifted_card.reload.updated_at.to_i).to eq(Time.zone.parse('2026-01-01 12:00:00 UTC').to_i)
+      expect(first_card.reload.position).to eq(1000)
+      expect(second_card.reload.position).to eq(2000)
+      expect(second_card.reload.updated_at.to_i).to eq(original_time.to_i)
     end
 
     it 'does not query labels tags or taggings per shifted card' do
@@ -104,7 +115,7 @@ RSpec.describe KanbanCards::CreateManualCardService do
 
       card = service.perform!
 
-      expect(card.position).to eq(1)
+      expect(card.position).to eq(1000)
       expect(inactive_card.reload.position).to eq(1)
     end
 
@@ -114,7 +125,7 @@ RSpec.describe KanbanCards::CreateManualCardService do
 
       card = service.perform!
 
-      expect(card.position).to eq(1)
+      expect(card.position).to eq(1000)
       expect(other_stage_card.reload.position).to eq(1)
     end
 
@@ -279,15 +290,14 @@ RSpec.describe KanbanCards::CreateManualCardService do
       expect { service.perform! }.to change(KanbanCard, :count).by(1)
     end
 
-    it 'rejects an unselected inbox in selected_inboxes mode' do
-      kanban_board.update!(inbox_scope_mode: 'selected_inboxes')
+    it 'rejects an inbox the entry rule does not name' do
+      restrict_board_to_inboxes(kanban_board)
 
       expect { service.perform! }.to raise_validation_error('Inbox is not allowed by board scope')
     end
 
     it 'allows admin to create within board scope' do
-      kanban_board.update!(inbox_scope_mode: 'selected_inboxes')
-      create(:kanban_board_inbox, account: account, kanban_board: kanban_board, inbox: inbox)
+      restrict_board_to_inboxes(kanban_board, inbox)
       admin = create(:user, account: account, role: :administrator)
       admin_service = build_service(user: admin)
 
@@ -295,7 +305,7 @@ RSpec.describe KanbanCards::CreateManualCardService do
     end
 
     it 'rejects admin when inbox is not in board scope' do
-      kanban_board.update!(inbox_scope_mode: 'selected_inboxes')
+      restrict_board_to_inboxes(kanban_board)
       admin = create(:user, account: account, role: :administrator)
       admin_service = build_service(user: admin)
 
@@ -358,7 +368,8 @@ RSpec.describe KanbanCards::CreateManualCardService do
       kanban_stage: overrides.fetch(:kanban_stage, kanban_stage),
       contact: overrides.fetch(:contact, contact),
       inbox: overrides.fetch(:inbox, inbox),
-      subject: overrides.fetch(:subject, card_subject)
+      subject: overrides.fetch(:subject, card_subject),
+      conversation: overrides.fetch(:conversation, nil)
     )
   end
 

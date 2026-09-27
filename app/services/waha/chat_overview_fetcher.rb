@@ -1,11 +1,13 @@
 class Waha::ChatOverviewFetcher
   PAGE_SIZE = 50
-  IGNORED_SUFFIXES = %w[@newsletter status@broadcast].freeze
 
   pattr_initialize [:channel!]
 
   # Returns the in-scope chat JIDs across every overview page: DMs (@c.us/@lid)
-  # always, groups (@g.us) only when enabled; newsletters/status are skipped.
+  # always, groups (@g.us) only when enabled; root newsletter/status/broadcast
+  # chats are explicitly skipped by Waha::InboundEventPolicy.
+  # Groups come first — with a bounded worker pool claiming chats in this same
+  # order, that's what gets imported first too.
   def all
     chat_ids = []
     offset = 0
@@ -18,21 +20,18 @@ class Waha::ChatOverviewFetcher
 
       offset += PAGE_SIZE
     end
-    chat_ids
+    groups, others = chat_ids.partition { |id| Waha::Jid.group?(id) }
+    groups + others
   end
 
   private
 
   def fetch_page(offset)
-    response = http_client.get("#{channel.session_name}/chats/overview?limit=#{PAGE_SIZE}&offset=#{offset}")
-    response.is_a?(Array) ? response : []
+    http_client.get_array("#{channel.session_name}/chats/overview?limit=#{PAGE_SIZE}&offset=#{offset}")
   end
 
   def in_scope?(id)
-    return false if IGNORED_SUFFIXES.any? { |suffix| id.end_with?(suffix) }
-    return channel.groups_enabled if id.end_with?('@g.us')
-
-    true
+    Waha::InboundEventPolicy.message(id, groups_enabled: channel.groups_enabled).action == :represent
   end
 
   def http_client

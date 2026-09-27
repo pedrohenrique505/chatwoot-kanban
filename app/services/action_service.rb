@@ -4,6 +4,8 @@ class ActionService
   def initialize(conversation)
     @conversation = conversation.reload
     @account = @conversation.account
+    # Set by Macros::ExecutionService; nil when a rule runs as the system.
+    @user = nil
   end
 
   def mute_conversation(_params)
@@ -117,4 +119,5 @@ class ActionService
   end
 end
 
+ActionService.include KanbanActionService
 ActionService.include_mod_with('ActionService')

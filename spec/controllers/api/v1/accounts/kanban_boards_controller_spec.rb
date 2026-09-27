@@ -20,8 +20,11 @@ RSpec.describe 'Kanban Boards API', type: :request do
 
       expect(response).to have_http_status(:success)
       expect(response.parsed_body.first['name']).to eq('Sales')
-      expect(response.parsed_body.first['auto_create_cards_from_conversations']).to be(false)
       expect(response.parsed_body.first).not_to have_key('use_opportunity_card_reads')
+      expect(response.parsed_body.first).to include(
+        'won_recurrence_enabled' => false,
+        'lost_recurrence_enabled' => false
+      )
     end
 
     it 'does not return inactive boards' do
@@ -83,6 +86,7 @@ RSpec.describe 'Kanban Boards API', type: :request do
         'visibility_mode' => 'selected_agents',
         'inbox_scope_mode' => 'selected_inboxes'
       )
+      expect(board_payload['allowed_inboxes'].pluck('id')).to eq([overview_data[:inbox].id])
       expect(board_payload['stages_summary']).to eq(overview_stages_summary(overview_data))
       expect(board_payload['visible_users']).to contain_exactly(
         hash_including('id' => overview_data[:visible_user].id, 'name' => 'Paula Agent', 'avatar_url' => anything)
@@ -90,6 +94,27 @@ RSpec.describe 'Kanban Boards API', type: :request do
       expect(board_payload['allowed_inboxes']).to contain_exactly(
         hash_including('id' => overview_data[:inbox].id, 'name' => 'Sales Inbox', 'channel_type' => overview_data[:inbox].channel_type)
       )
+    end
+
+    it 'preloads custom fields and reasons across the board list' do
+      second_board = create(:kanban_board, account: account, name: 'Renewals')
+      [kanban_board, second_board].each do |board|
+        KanbanCustomField.create!(account: account, kanban_board: board, key: 'company_size')
+        KanbanReason.create!(account: account, kanban_board: board, title: 'No budget')
+      end
+      sql_queries = []
+      callback = ->(_name, _start, _finish, _id, payload) { sql_queries << payload[:sql] if payload[:sql].present? }
+
+      ActiveSupport::Notifications.subscribed(callback, 'sql.active_record') do
+        get "/api/v1/accounts/#{account.id}/kanban_boards",
+            headers: administrator.create_new_auth_token,
+            as: :json
+      end
+
+      custom_field_queries = sql_queries.count { |sql| sql.match?(/FROM "kanban_custom_fields"|JOIN "kanban_custom_fields"/) }
+      reason_queries = sql_queries.count { |sql| sql.match?(/FROM "kanban_reasons"|JOIN "kanban_reasons"/) }
+      expect(response.parsed_body.sum { |board| board['custom_fields'].length }).to eq(2)
+      expect([custom_field_queries, reason_queries]).to eq([1, 1])
     end
   end
 
@@ -184,8 +209,7 @@ RSpec.describe 'Kanban Boards API', type: :request do
 
     it 'returns inbox scope metadata for the board header' do
       inbox = create(:inbox, account: account)
-      kanban_board.update!(inbox_scope_mode: 'selected_inboxes')
-      create(:kanban_board_inbox, account: account, kanban_board: kanban_board, inbox: inbox)
+      restrict_board_to_inboxes(kanban_board, inbox)
 
       get "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}",
           headers: agent.create_new_auth_token,
@@ -251,8 +275,8 @@ RSpec.describe 'Kanban Boards API', type: :request do
       inbox = create(:inbox, account: account)
       second_agent = create(:user, account: account, role: :agent)
       create(:inbox_member, user: agent, inbox: inbox)
-      create_board_listing_conversation_card(stage, inbox, assignee: agent, position: 1)
-      filtered_card = create_board_listing_conversation_card(stage, inbox, assignee: second_agent, position: 2)
+      create_board_listing_conversation_card(stage, inbox, assignees: [agent], position: 1)
+      filtered_card = create_board_listing_conversation_card(stage, inbox, assignees: [second_agent], position: 2)
 
       get "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}",
           headers: agent.create_new_auth_token,
@@ -283,13 +307,13 @@ RSpec.describe 'Kanban Boards API', type: :request do
       second_inbox = create(:inbox, account: account)
       create(:inbox_member, user: agent, inbox: inbox)
       create(:inbox_member, user: agent, inbox: second_inbox)
-      create_board_listing_conversation_card(stage, inbox, assignee: second_agent, position: 1)
-      filtered_card = create_board_listing_conversation_card(stage, second_inbox, assignee: second_agent, position: 2)
-      create_board_listing_conversation_card(stage, second_inbox, assignee: agent, position: 3)
+      create_board_listing_conversation_card(stage, inbox, assignees: [second_agent], position: 1)
+      filtered_card = create_board_listing_conversation_card(stage, second_inbox, assignees: [second_agent], position: 2)
+      create_board_listing_conversation_card(stage, second_inbox, assignees: [agent], position: 3)
 
       get "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}",
           headers: agent.create_new_auth_token,
-          params: { inbox_ids: [second_inbox.id], assignee_ids: [second_agent.id] },
+          params: { inbox_ids: [second_inbox.id], assignee_ids: [second_agent.id], match_mode: 'all' },
           as: :json
 
       response_stage = response.parsed_body['stages'].first
@@ -298,12 +322,13 @@ RSpec.describe 'Kanban Boards API', type: :request do
       expect(response_stage['pagination']['total_count']).to eq(1)
     end
 
-    it 'excludes manual cards when filtering embedded cards by assignee ids' do
+    it 'keeps manual cards when they carry the filtered assignee' do
       stage = create(:kanban_stage, account: account, kanban_board: kanban_board)
       inbox = create(:inbox, account: account)
       create(:inbox_member, user: agent, inbox: inbox)
       manual_card = create_board_listing_manual_cards(stage, inbox, 1).first
-      conversation_card = create_board_listing_conversation_card(stage, inbox, assignee: agent, position: 2)
+      manual_card.update_assignees!([agent.id])
+      unassigned_card = create_board_listing_conversation_card(stage, inbox, assignee: agent, position: 2)
 
       get "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}",
           headers: agent.create_new_auth_token,
@@ -312,8 +337,8 @@ RSpec.describe 'Kanban Boards API', type: :request do
 
       response_stage = response.parsed_body['stages'].first
       expect(response).to have_http_status(:success)
-      expect(response_stage['cards'].pluck('id')).to eq([conversation_card.id])
-      expect(response_stage['cards'].pluck('id')).not_to include(manual_card.id)
+      expect(response_stage['cards'].pluck('id')).to eq([manual_card.id])
+      expect(response_stage['cards'].pluck('id')).not_to include(unassigned_card.id)
     end
 
     it 'returns has_more false for stages with at most 20 cards' do
@@ -751,9 +776,7 @@ RSpec.describe 'Kanban Boards API', type: :request do
 
         expect(response).to have_http_status(:success)
         expect(sql_queries.none? { |sql| sql.include?('notes') }).to be(true), 'Board listing should not query the notes table'
-        expect(sql_queries.none? { |sql| sql.include?('taggings') }).to be(true), 'Board listing should not query the taggings table'
-        expect(sql_queries.none? { |sql| sql.include?('tags') }).to be(true), 'Board listing should not query the tags table'
-        expect(sql_queries.none? { |sql| sql.include?('labels') }).to be(true), 'Board listing should not query the labels table'
+        expect(labels_tags_taggings_query_count(sql_queries)).to be <= 1
       end
 
       it 'does not query messages during board listing' do
@@ -776,7 +799,7 @@ RSpec.describe 'Kanban Boards API', type: :request do
         expect(sql_queries.none? { |sql| sql.include?('FROM "messages"') }).to be(true), 'Board listing should not query messages'
       end
 
-      it 'does not query notes taggings tags or labels with multiple cards sharing a contact' do
+      it 'keeps label loading batched with multiple cards sharing a contact' do
         stage = create(:kanban_stage, account: account, kanban_board: kanban_board)
         inbox = create(:inbox, account: account)
         contact = create(:contact, account: account)
@@ -820,9 +843,7 @@ RSpec.describe 'Kanban Boards API', type: :request do
 
         expect(response).to have_http_status(:success)
         expect(sql_queries.none? { |sql| sql.include?('notes') }).to be(true)
-        expect(sql_queries.none? { |sql| sql.include?('taggings') }).to be(true)
-        expect(sql_queries.none? { |sql| sql.include?('tags') }).to be(true)
-        expect(sql_queries.none? { |sql| sql.include?('labels') }).to be(true)
+        expect(labels_tags_taggings_query_count(sql_queries)).to be <= 1
       end
 
       it 'keeps board listing query categories bounded with mixed active card visibility' do
@@ -835,8 +856,13 @@ RSpec.describe 'Kanban Boards API', type: :request do
         expect(response).to have_http_status(:success)
         expect(rendered_card_ids).to match_array(expected_card_ids)
         expect([rendered_card_ids.length, rendered_card_ids.intersect?(inactive_kanban_card_ids)]).to eq([30, false])
-        expect(query_counts.slice(:messages, :notes, :labels_tags_taggings)).to eq(messages: 0, notes: 0, labels_tags_taggings: 0)
-        expect(query_counts[:kanban_cards]).to be <= 9
+        expect(query_counts).to include(
+          messages: 0,
+          notes: 0,
+          labels_tags_taggings: be <= 1,
+          kanban_cards: be <= 9,
+          card_payloads: be <= 1
+        )
         expect(query_counts[:inbox_members]).to be <= 1
         expect(query_counts[:team_members]).to be <= 1
       end
@@ -974,37 +1000,69 @@ RSpec.describe 'Kanban Boards API', type: :request do
 
       expect(response).to have_http_status(:success)
       expect(response.parsed_body['name']).to eq('Support')
-      expect(response.parsed_body['auto_create_cards_from_conversations']).to be(false)
+      expect(response.parsed_body['active']).to be(true)
       expect(response.parsed_body).not_to have_key('use_opportunity_card_reads')
     end
 
-    it 'creates a board for agents' do
+    it 'creates the blank template with terminal stages' do
+      post "/api/v1/accounts/#{account.id}/kanban_boards",
+           headers: administrator.create_new_auth_token,
+           params: payload.merge(template_key: 'blank'),
+           as: :json
+
+      created_board = KanbanBoard.order(:id).last
+      stages = created_board.kanban_stages.active.ordered
+
+      expect(response).to have_http_status(:success)
+      expect(stages.pluck(:name, :position)).to eq(
+        [['Inbox', 1], ['Won', 2], ['Lost', 3]]
+      )
+      expect(created_board).to have_attributes(
+        won_stage_id: stages.second.id,
+        lost_stage_id: stages.third.id
+      )
+      expect(stages.second.color).to eq(KanbanBoards::TemplateCatalog::WON_COLOR)
+      expect(stages.third.color).to eq(KanbanBoards::TemplateCatalog::LOST_COLOR)
+    end
+
+    it 'uses the account locale for template stage names' do
+      account.update!(locale: 'pt_BR')
+
+      post "/api/v1/accounts/#{account.id}/kanban_boards",
+           headers: administrator.create_new_auth_token,
+           params: payload.merge(template_key: 'blank'),
+           as: :json
+
+      created_board = KanbanBoard.order(:id).last
+
+      expect(response).to have_http_status(:success)
+      expect(created_board.kanban_stages.active.ordered.pluck(:name)).to eq(
+        %w[Entrada Ganho Perdido]
+      )
+    end
+
+    it 'does not create a board for agents' do
       expect do
         post "/api/v1/accounts/#{account.id}/kanban_boards",
              headers: agent.create_new_auth_token,
              params: payload,
              as: :json
-      end.to change(KanbanBoard, :count).by(1)
+      end.not_to change(KanbanBoard, :count)
 
-      created_board = KanbanBoard.last
-      expect(response).to have_http_status(:success)
-      expect(created_board).to have_attributes(
-        name: 'Support',
-        account_id: account.id,
-        visibility_mode: 'all_agents',
-        inbox_scope_mode: 'all_inboxes'
-      )
+      expect(response).to have_http_status(:unauthorized)
     end
 
-    it 'accepts automatic card creation setting' do
-      post "/api/v1/accounts/#{account.id}/kanban_boards",
-           headers: administrator.create_new_auth_token,
-           params: { kanban_board: payload[:kanban_board].merge(auto_create_cards_from_conversations: true) },
-           as: :json
+    it 'rolls the board back when the name is already taken' do
+      create(:kanban_board, account: account, name: 'Support')
 
-      expect(response).to have_http_status(:success)
-      expect(KanbanBoard.last.auto_create_cards_from_conversations).to be(true)
-      expect(response.parsed_body['auto_create_cards_from_conversations']).to be(true)
+      expect do
+        post "/api/v1/accounts/#{account.id}/kanban_boards",
+             headers: administrator.create_new_auth_token,
+             params: payload,
+             as: :json
+      end.not_to change(KanbanBoard, :count)
+
+      expect(response).to have_http_status(:unprocessable_entity)
     end
 
     it 'returns unauthorized for users outside the account' do
@@ -1024,12 +1082,14 @@ RSpec.describe 'Kanban Boards API', type: :request do
       kanban_board.update!(
         description: 'Pipeline comercial',
         visibility_mode: 'selected_agents',
-        inbox_scope_mode: 'selected_inboxes',
-        auto_create_cards_from_conversations: true
+        won_recurrence_enabled: true,
+        won_recurrence_window_minutes: 12,
+        lost_recurrence_enabled: true,
+        lost_recurrence_window_minutes: 48
       )
       inbox = create(:inbox, account: account)
       create(:kanban_board_member, account: account, kanban_board: kanban_board, user: agent)
-      create(:kanban_board_inbox, account: account, kanban_board: kanban_board, inbox: inbox)
+      restrict_board_to_inboxes(kanban_board, inbox)
 
       get "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}/settings",
           headers: administrator.create_new_auth_token,
@@ -1044,7 +1104,10 @@ RSpec.describe 'Kanban Boards API', type: :request do
         'visible_user_ids' => [agent.id],
         'inbox_scope_mode' => 'selected_inboxes',
         'allowed_inbox_ids' => [inbox.id],
-        'auto_create_cards_from_conversations' => true
+        'won_recurrence_enabled' => true,
+        'won_recurrence_window_minutes' => 12,
+        'lost_recurrence_enabled' => true,
+        'lost_recurrence_window_minutes' => 48
       )
       expect(response.parsed_body).not_to include('visible_users', 'allowed_inboxes')
     end
@@ -1069,7 +1132,10 @@ RSpec.describe 'Kanban Boards API', type: :request do
               kanban_board: {
                 name: 'Vendas',
                 description: 'Pipeline comercial',
-                auto_create_cards_from_conversations: true
+                won_recurrence_enabled: true,
+                won_recurrence_window_minutes: 12,
+                lost_recurrence_enabled: true,
+                lost_recurrence_window_minutes: 48
               }
             },
             as: :json
@@ -1078,7 +1144,10 @@ RSpec.describe 'Kanban Boards API', type: :request do
       expect(kanban_board.reload).to have_attributes(
         name: 'Vendas',
         description: 'Pipeline comercial',
-        auto_create_cards_from_conversations: true
+        won_recurrence_enabled: true,
+        won_recurrence_window_minutes: 12,
+        lost_recurrence_enabled: true,
+        lost_recurrence_window_minutes: 48
       )
     end
 
@@ -1101,45 +1170,17 @@ RSpec.describe 'Kanban Boards API', type: :request do
       expect(response.parsed_body['visible_user_ids']).to eq([second_agent.id])
     end
 
-    it 'replaces inboxes' do
-      old_inbox = create(:inbox, account: account)
-      create(:kanban_board_inbox, account: account, kanban_board: kanban_board, inbox: old_inbox)
-
-      patch "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}/settings",
-            headers: administrator.create_new_auth_token,
-            params: {
-              kanban_board: {
-                inbox_scope_mode: 'selected_inboxes',
-                allowed_inbox_ids: [inbox.id]
-              }
-            },
-            as: :json
-
-      expect(response).to have_http_status(:success)
-      expect(kanban_board.reload).to be_selected_inboxes
-      expect(kanban_board.kanban_board_inboxes.pluck(:inbox_id)).to eq([inbox.id])
-      expect(response.parsed_body['allowed_inbox_ids']).to eq([inbox.id])
-    end
-
-    it 'cleans associations when using all_agents and all_inboxes' do
+    it 'cleans memberships when switching back to all_agents' do
       create(:kanban_board_member, account: account, kanban_board: kanban_board, user: agent)
-      create(:kanban_board_inbox, account: account, kanban_board: kanban_board, inbox: inbox)
 
       patch "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}/settings",
             headers: administrator.create_new_auth_token,
-            params: {
-              kanban_board: {
-                visibility_mode: 'all_agents',
-                inbox_scope_mode: 'all_inboxes'
-              }
-            },
+            params: { kanban_board: { visibility_mode: 'all_agents' } },
             as: :json
 
       expect(response).to have_http_status(:success)
       expect(kanban_board.reload).to be_all_agents
-      expect(kanban_board).to be_all_inboxes
       expect(kanban_board.kanban_board_members).to be_empty
-      expect(kanban_board.kanban_board_inboxes).to be_empty
     end
 
     it 'deduplicates selected user and inbox ids' do
@@ -1148,16 +1189,13 @@ RSpec.describe 'Kanban Boards API', type: :request do
             params: {
               kanban_board: {
                 visibility_mode: 'selected_agents',
-                visible_user_ids: [agent.id, agent.id, second_agent.id],
-                inbox_scope_mode: 'selected_inboxes',
-                allowed_inbox_ids: [inbox.id, inbox.id]
+                visible_user_ids: [agent.id, agent.id, second_agent.id]
               }
             },
             as: :json
 
       expect(response).to have_http_status(:success)
       expect(kanban_board.kanban_board_members.order(:user_id).pluck(:user_id)).to eq([agent.id, second_agent.id].sort)
-      expect(kanban_board.kanban_board_inboxes.pluck(:inbox_id)).to eq([inbox.id])
     end
 
     it 'rejects users from another account' do
@@ -1178,40 +1216,22 @@ RSpec.describe 'Kanban Boards API', type: :request do
       expect(kanban_board.kanban_board_members).to be_empty
     end
 
-    it 'rejects inboxes from another account' do
-      other_inbox = create(:inbox, account: create(:account))
-
-      patch "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}/settings",
-            headers: administrator.create_new_auth_token,
-            params: {
-              kanban_board: {
-                inbox_scope_mode: 'selected_inboxes',
-                allowed_inbox_ids: [other_inbox.id]
-              }
-            },
-            as: :json
-
-      expect(response).to have_http_status(:unprocessable_content)
-      expect(kanban_board.reload).to be_all_inboxes
-      expect(kanban_board.kanban_board_inboxes).to be_empty
-    end
-
     it 'rolls back all changes when association validation fails' do
-      other_inbox = create(:inbox, account: create(:account))
+      other_user = create(:user, account: create(:account), role: :agent)
 
       patch "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}/settings",
             headers: administrator.create_new_auth_token,
             params: {
               kanban_board: {
                 name: 'Vendas',
-                inbox_scope_mode: 'selected_inboxes',
-                allowed_inbox_ids: [other_inbox.id]
+                visibility_mode: 'selected_agents',
+                visible_user_ids: [other_user.id]
               }
             },
             as: :json
 
       expect(response).to have_http_status(:unprocessable_content)
-      expect(kanban_board.reload).to have_attributes(name: 'Sales', inbox_scope_mode: 'all_inboxes')
+      expect(kanban_board.reload).to have_attributes(name: 'Sales', visibility_mode: 'all_agents')
     end
 
     it 'emits kanban.board.updated after success' do
@@ -1312,30 +1332,6 @@ RSpec.describe 'Kanban Boards API', type: :request do
       )
     end
 
-    it 'updates automatic card creation from false to true' do
-      patch "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}",
-            headers: administrator.create_new_auth_token,
-            params: { kanban_board: { auto_create_cards_from_conversations: true } },
-            as: :json
-
-      expect(response).to have_http_status(:success)
-      expect(kanban_board.reload.auto_create_cards_from_conversations).to be(true)
-      expect(response.parsed_body['auto_create_cards_from_conversations']).to be(true)
-    end
-
-    it 'updates automatic card creation from true to false' do
-      kanban_board.update!(auto_create_cards_from_conversations: true)
-
-      patch "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}",
-            headers: administrator.create_new_auth_token,
-            params: { kanban_board: { auto_create_cards_from_conversations: false } },
-            as: :json
-
-      expect(response).to have_http_status(:success)
-      expect(kanban_board.reload.auto_create_cards_from_conversations).to be(false)
-      expect(response.parsed_body['auto_create_cards_from_conversations']).to be(false)
-    end
-
     it 'rejects agents' do
       patch "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}",
             headers: agent.create_new_auth_token,
@@ -1391,8 +1387,8 @@ RSpec.describe 'Kanban Boards API', type: :request do
   end
 
   def create_overview_summary_data
-    first_stage = create_overview_stage(name: 'Lead', color: 'blue', position: 1)
-    second_stage = create_overview_stage(name: 'Won', color: 'green', position: 2)
+    first_stage = create_overview_stage(name: 'Lead', color: '#2781F6', position: 1)
+    second_stage = create_overview_stage(name: 'Won', color: '#22C55E', position: 2)
     inactive_stage = create_overview_stage(name: 'Archived', active: false, position: 3)
     inbox = create(:inbox, account: account, name: 'Sales Inbox')
     visible_user = create(:user, account: account, name: 'Paula Agent')
@@ -1404,9 +1400,9 @@ RSpec.describe 'Kanban Boards API', type: :request do
   end
 
   def create_overview_board_access(inbox, visible_user)
-    kanban_board.update!(visibility_mode: 'selected_agents', inbox_scope_mode: 'selected_inboxes')
+    kanban_board.update!(visibility_mode: 'selected_agents')
     create(:kanban_board_member, account: account, kanban_board: kanban_board, user: visible_user)
-    create(:kanban_board_inbox, account: account, kanban_board: kanban_board, inbox: inbox)
+    restrict_board_to_inboxes(kanban_board, inbox)
   end
 
   def create_overview_cards(first_stage, second_stage, inactive_stage, inbox)
@@ -1422,8 +1418,8 @@ RSpec.describe 'Kanban Boards API', type: :request do
 
   def overview_stages_summary(overview_data)
     [
-      { 'id' => overview_data[:first_stage].id, 'name' => 'Lead', 'color' => 'blue', 'cards_count' => 1 },
-      { 'id' => overview_data[:second_stage].id, 'name' => 'Won', 'color' => 'green', 'cards_count' => 2 }
+      { 'id' => overview_data[:first_stage].id, 'name' => 'Lead', 'color' => '#2781F6', 'cards_count' => 1 },
+      { 'id' => overview_data[:second_stage].id, 'name' => 'Won', 'color' => '#22C55E', 'cards_count' => 2 }
     ]
   end
 
@@ -1442,10 +1438,10 @@ RSpec.describe 'Kanban Boards API', type: :request do
     end
   end
 
-  def create_board_listing_conversation_card(stage, inbox, assignee:, position:)
+  def create_board_listing_conversation_card(stage, inbox, position:, assignee: nil, assignees: [])
     contact = create(:contact, account: account)
     conversation = create(:conversation, account: account, inbox: inbox, contact: contact, assignee: assignee)
-    create(
+    card = create(
       :kanban_card,
       :conversation_origin,
       account: account,
@@ -1454,6 +1450,8 @@ RSpec.describe 'Kanban Boards API', type: :request do
       conversation: conversation,
       position: position
     )
+    card.update_assignees!(assignees.map(&:id)) if assignees.present?
+    card
   end
 
   def query_budget_board_listing_context
@@ -1569,6 +1567,7 @@ RSpec.describe 'Kanban Boards API', type: :request do
   def board_listing_query_counts(sql_queries)
     {
       kanban_cards: sql_queries.count { |sql| sql.match?(/FROM "kanban_cards"|JOIN "kanban_cards"/) },
+      card_payloads: sql_queries.count { |sql| sql.include?('FROM "kanban_cards" WHERE "kanban_cards"."id" IN') },
       inbox_members: sql_queries.count { |sql| sql.match?(/FROM "inbox_members"|JOIN "inbox_members"/) },
       team_members: sql_queries.count { |sql| sql.match?(/FROM "team_members"|JOIN "team_members"/) },
       messages: sql_queries.count { |sql| sql.match?(/FROM "messages"|JOIN "messages"/) },
@@ -1585,8 +1584,9 @@ RSpec.describe 'Kanban Boards API', type: :request do
 
   def compact_card_keys
     %w[
-      id kanban_stage_id position origin subject active due_at stage_entered_at contact inbox conversation_id priority conversation assignee
-      moved_by_id moved_at card_priority assignees
+      id kanban_stage_id previous_stage_id position origin subject active custom_field_keys kanban_reason_id
+      products items_total discount_type discount_amount discount_value value due_at labels stage_entered_at
+      contact inbox conversation_id priority card_priority assignees conversation assignee moved_by_id moved_at
     ]
   end
 

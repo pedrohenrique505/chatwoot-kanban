@@ -33,6 +33,15 @@ RSpec.describe 'Kanban Cards API', type: :request do
       )
     end
 
+    it 'creates a manual card with a due date' do
+      due_at = 2.days.from_now.change(usec: 0)
+
+      post_manual_card(params: manual_card_payload.merge(due_at: due_at.iso8601))
+
+      expect(KanbanCard.last.due_at).to eq(due_at)
+      expect(response.parsed_body['due_at']).to eq(due_at.iso8601)
+    end
+
     it 'emits kanban.card.created with a compact payload' do
       allow(Rails.configuration.dispatcher).to receive(:dispatch)
 
@@ -151,8 +160,8 @@ RSpec.describe 'Kanban Cards API', type: :request do
       expect(response).to have_http_status(:not_found)
     end
 
-    it 'rejects inbox not in selected_inboxes scope' do
-      kanban_board.update!(inbox_scope_mode: 'selected_inboxes')
+    it 'rejects inbox the entry rules do not name' do
+      restrict_board_to_inboxes(kanban_board)
 
       post_manual_card
 
@@ -160,9 +169,8 @@ RSpec.describe 'Kanban Cards API', type: :request do
       expect(response.parsed_body['message']).to include('Inbox is not allowed by board scope')
     end
 
-    it 'accepts inbox when selected in selected_inboxes scope' do
-      kanban_board.update!(inbox_scope_mode: 'selected_inboxes')
-      create(:kanban_board_inbox, account: account, kanban_board: kanban_board, inbox: manual_inbox)
+    it 'accepts inbox when an entry rule names it' do
+      restrict_board_to_inboxes(kanban_board, manual_inbox)
 
       post_manual_card
 
@@ -203,6 +211,134 @@ RSpec.describe 'Kanban Cards API', type: :request do
         post_manual_card(headers: admin.create_new_auth_token)
       end.to change(KanbanCard.manual, :count).by(1)
       expect(response).to have_http_status(:created)
+    end
+
+    it 'uses the selected conversation display id and derives its inbox' do
+      selected_inbox = create(:inbox, account: account)
+      create(:inbox_member, user: agent, inbox: selected_inbox)
+      selected_conversation = create(:conversation, account: account, contact: manual_contact, inbox: selected_inbox)
+
+      post_manual_card(
+        params: manual_card_payload.merge(
+          inbox_id: manual_inbox.id,
+          conversation_display_id: selected_conversation.display_id
+        )
+      )
+
+      expect(response).to have_http_status(:created)
+      expect(KanbanCard.last).to have_attributes(
+        conversation_id: selected_conversation.id,
+        inbox_id: selected_inbox.id
+      )
+    end
+
+    it 'rejects a selected conversation from a different contact' do
+      selected_conversation = create(:conversation, account: account, inbox: manual_inbox)
+
+      post_manual_card(params: manual_card_payload.merge(conversation_display_id: selected_conversation.display_id))
+
+      expect(response).to have_http_status(:unprocessable_entity)
+      expect(response.parsed_body['message']).to include('Conversation must belong to contact')
+    end
+  end
+
+  describe 'GET /api/v1/accounts/{account.id}/kanban_boards/{kanban_board.id}/cards/lookup' do
+    it 'returns only active cards for the selected contact' do
+      create_manual_card(conversation: conversation, subject: 'Recent quote')
+      create_manual_card(conversation: conversation, subject: 'Inactive quote', active: false)
+
+      get "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}/cards/lookup",
+          headers: agent.create_new_auth_token,
+          params: { contact_id: conversation.contact.id },
+          as: :json
+
+      expect(response).to have_http_status(:success)
+      expect(response.parsed_body).to contain_exactly(
+        {
+          'stage_name' => stage.name,
+          'conversation_id' => conversation.display_id,
+          'terminal' => false
+        }
+      )
+    end
+  end
+
+  describe 'GET /api/v1/accounts/{account.id}/kanban_boards/{kanban_board.id}/cards' do
+    it 'returns compact cards without querying conversation messages per card' do
+      cards = Array.new(3) do |index|
+        create(:message, account: account, inbox: conversation.inbox, conversation: conversation) if index.zero?
+        create(
+          :kanban_card,
+          :conversation_origin,
+          account: account,
+          kanban_board: kanban_board,
+          kanban_stage: stage,
+          conversation: conversation,
+          subject: "Opportunity #{index}",
+          priority: :high,
+          position: index + 1
+        )
+      end
+
+      sql_queries = []
+      callback = ->(_name, _start, _finish, _id, payload) { sql_queries << payload[:sql] if payload[:sql].present? }
+      ActiveSupport::Notifications.subscribed(callback, 'sql.active_record') do
+        get "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}/cards",
+            headers: agent.create_new_auth_token,
+            as: :json
+      end
+
+      expect(response).to have_http_status(:success)
+      expect(response.parsed_body['cards'].pluck('id')).to eq(cards.pluck(:id))
+      expect(response.parsed_body['cards']).to all(include('kanban_board_id' => kanban_board.id, 'priority' => 'high'))
+      expect(sql_queries.none? { |sql| sql.match?(/FROM "messages"|JOIN "messages"/) }).to be(true)
+      payload_query = sql_queries.find { |sql| sql.include?('FROM "kanban_cards" WHERE "kanban_cards"."id" IN') }
+      expect(payload_query).not_to include('"kanban_cards"."description"')
+    end
+  end
+
+  describe 'PATCH /api/v1/accounts/{account.id}/kanban_boards/{kanban_board.id}/cards/by_id/{id}/move' do
+    it 'moves a card across boards and emits delete and create events' do
+      target_board = create(:kanban_board, account: account, name: 'Support')
+      target_stage = create(:kanban_stage, account: account, kanban_board: target_board, name: 'Triage')
+      card = create_manual_card(subject: 'Cross-board opportunity')
+      allow(Rails.configuration.dispatcher).to receive(:dispatch)
+
+      patch stable_card_url(card, suffix: 'move'),
+            headers: agent.create_new_auth_token,
+            params: { target_kanban_board_id: target_board.id, kanban_stage_id: target_stage.id },
+            as: :json
+
+      expect(response).to have_http_status(:success)
+      expect(card.reload).to have_attributes(kanban_board_id: target_board.id, kanban_stage_id: target_stage.id)
+      expect(response.parsed_body).to include('kanban_board_id' => target_board.id, 'kanban_stage_id' => target_stage.id)
+      expect(Rails.configuration.dispatcher).to have_received(:dispatch).with(
+        Events::Types::KANBAN_CARD_DELETED,
+        anything,
+        { account_id: account.id, board_id: kanban_board.id, stage_id: stage.id, card_id: card.id, conversation_id: nil }
+      )
+      expect(Rails.configuration.dispatcher).to have_received(:dispatch).with(
+        Events::Types::KANBAN_CARD_CREATED,
+        anything,
+        { account_id: account.id, board_id: target_board.id, stage_id: target_stage.id, card_id: card.id, conversation_id: nil }
+      )
+    end
+
+    it 'returns a duplicate error without moving the source card' do
+      target_board = create(:kanban_board, account: account, name: 'Support')
+      target_stage = create(:kanban_stage, account: account, kanban_board: target_board, name: 'Triage')
+      card = create_manual_card(subject: 'Duplicate opportunity')
+      create(:kanban_card, account: account, kanban_board: target_board, kanban_stage: target_stage,
+                           contact: card.contact, inbox: card.inbox, subject: card.subject)
+
+      patch stable_card_url(card, suffix: 'move'),
+            headers: agent.create_new_auth_token,
+            params: { target_kanban_board_id: target_board.id, kanban_stage_id: target_stage.id },
+            as: :json
+
+      expect(response).to have_http_status(:unprocessable_content)
+      expect(response.parsed_body).to eq('error' => 'card_already_in_target_board')
+      expect(card.reload.kanban_board_id).to eq(kanban_board.id)
     end
   end
 
@@ -341,7 +477,7 @@ RSpec.describe 'Kanban Cards API', type: :request do
       expect(response).to have_http_status(:success)
       expect(card.reload).to have_attributes(
         kanban_stage_id: next_stage.id,
-        position: 1,
+        position: 1000,
         stage_entered_at: Time.zone.parse('2026-06-09 12:00:00 UTC')
       )
       expect(card.stage_entered_at).not_to eq(previous_stage_entered_at)
@@ -686,22 +822,94 @@ RSpec.describe 'Kanban Cards API', type: :request do
     end
 
     it 'reorders a card by stable ID within the same stage' do
-      first_card = create_manual_card(position: 1)
-      second_card = create_manual_card(position: 2, subject: 'Second opportunity')
-      third_card = create_manual_card(position: 3, subject: 'Third opportunity')
+      first_card = create_manual_card(position: 1000)
+      second_card = create_manual_card(position: 2000, subject: 'Second opportunity')
+      third_card = create_manual_card(position: 3000, subject: 'Third opportunity')
       previous_stage_entered_at = 2.days.ago.change(usec: 0)
       third_card.update_column(:stage_entered_at, previous_stage_entered_at) # rubocop:disable Rails/SkipsModelValidations
 
       patch "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}/cards/by_id/#{third_card.id}/reorder",
             headers: agent.create_new_auth_token,
-            params: { card: { position: 1 } },
+            params: { card: { after_card_id: nil } },
             as: :json
 
       expect(response).to have_http_status(:success)
-      expect(third_card.reload.position).to eq(1)
-      expect(third_card.stage_entered_at).to eq(previous_stage_entered_at)
-      expect(first_card.reload.position).to eq(2)
-      expect(second_card.reload.position).to eq(3)
+      expect(stage_card_ids(stage)).to eq([third_card.id, first_card.id, second_card.id])
+      expect(third_card.reload.stage_entered_at).to eq(previous_stage_entered_at)
+      expect(first_card.reload.position).to eq(1000)
+      expect(second_card.reload.position).to eq(2000)
+    end
+
+    it 'reorders a card below an anchor in another stage' do
+      destination_stage = create(:kanban_stage, account: account, kanban_board: kanban_board)
+      anchor_card = create_manual_card(
+        kanban_stage: destination_stage,
+        position: 1000,
+        subject: 'Destination anchor'
+      )
+      trailing_card = create_manual_card(
+        kanban_stage: destination_stage,
+        position: 2000,
+        subject: 'Destination trailing'
+      )
+      moving_card = create_manual_card(position: 1000, subject: 'Moving opportunity')
+
+      patch stable_card_url(moving_card, suffix: 'reorder'),
+            headers: agent.create_new_auth_token,
+            params: {
+              card: {
+                kanban_stage_id: destination_stage.id,
+                after_card_id: anchor_card.id
+              }
+            },
+            as: :json
+
+      expect(response).to have_http_status(:success)
+      expect(moving_card.reload.kanban_stage_id).to eq(destination_stage.id)
+      expect(stage_card_ids(destination_stage)).to eq([anchor_card.id, moving_card.id, trailing_card.id])
+      expect(anchor_card.reload.position).to eq(1000)
+      expect(trailing_card.reload.position).to eq(2000)
+    end
+
+    it 'reorders a card to the top of another stage with a null anchor' do
+      destination_stage = create(:kanban_stage, account: account, kanban_board: kanban_board)
+      existing_card = create_manual_card(
+        kanban_stage: destination_stage,
+        position: 1000,
+        subject: 'Existing destination opportunity'
+      )
+      moving_card = create_manual_card(position: 1000, subject: 'Top opportunity')
+
+      patch stable_card_url(moving_card, suffix: 'reorder'),
+            headers: agent.create_new_auth_token,
+            params: {
+              card: {
+                kanban_stage_id: destination_stage.id,
+                after_card_id: nil
+              }
+            },
+            as: :json
+
+      expect(response).to have_http_status(:success)
+      expect(moving_card.reload.kanban_stage_id).to eq(destination_stage.id)
+      expect(stage_card_ids(destination_stage)).to eq([moving_card.id, existing_card.id])
+      expect(existing_card.reload.position).to eq(1000)
+    end
+
+    it 'reorders a card down within a stage using an anchor' do
+      moving_card = create_manual_card(position: 1000, subject: 'Moving down')
+      anchor_card = create_manual_card(position: 2000, subject: 'Downward anchor')
+      trailing_card = create_manual_card(position: 3000, subject: 'Trailing opportunity')
+
+      patch stable_card_url(moving_card, suffix: 'reorder'),
+            headers: agent.create_new_auth_token,
+            params: { card: { after_card_id: anchor_card.id } },
+            as: :json
+
+      expect(response).to have_http_status(:success)
+      expect(stage_card_ids(stage)).to eq([anchor_card.id, moving_card.id, trailing_card.id])
+      expect(anchor_card.reload.position).to eq(2000)
+      expect(trailing_card.reload.position).to eq(3000)
     end
 
     it 'emits kanban.card.reordered with equal source and target stage IDs for same-stage reorder' do
@@ -731,28 +939,28 @@ RSpec.describe 'Kanban Cards API', type: :request do
 
     it 'reorders a card by stable ID across stages' do
       destination_stage = create(:kanban_stage, account: account, kanban_board: kanban_board)
-      moving_card = create_manual_card(position: 1)
-      source_card = create_manual_card(position: 2, subject: 'Source opportunity')
-      destination_card = create_manual_card(kanban_stage: destination_stage, position: 1, subject: 'Destination opportunity')
+      moving_card = create_manual_card(position: 1000)
+      source_card = create_manual_card(position: 2000, subject: 'Source opportunity')
+      destination_card = create_manual_card(kanban_stage: destination_stage, position: 1000, subject: 'Destination opportunity')
       previous_stage_entered_at = 2.days.ago.change(usec: 0)
       moving_card.update_column(:stage_entered_at, previous_stage_entered_at) # rubocop:disable Rails/SkipsModelValidations
 
       travel_to(Time.zone.parse('2026-06-09 12:00:00 UTC')) do
         patch "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}/cards/by_id/#{moving_card.id}/reorder",
               headers: agent.create_new_auth_token,
-              params: { card: { kanban_stage_id: destination_stage.id, position: 1 } },
+              params: { card: { kanban_stage_id: destination_stage.id, after_card_id: nil } },
               as: :json
       end
 
       expect(response).to have_http_status(:success)
       expect(moving_card.reload).to have_attributes(
         kanban_stage_id: destination_stage.id,
-        position: 1,
         stage_entered_at: Time.zone.parse('2026-06-09 12:00:00 UTC')
       )
       expect(moving_card.stage_entered_at).not_to eq(previous_stage_entered_at)
-      expect(source_card.reload.position).to eq(1)
-      expect(destination_card.reload.position).to eq(2)
+      expect(stage_card_ids(destination_stage)).to eq([moving_card.id, destination_card.id])
+      expect(source_card.reload.position).to eq(2000)
+      expect(destination_card.reload.position).to eq(1000)
     end
 
     it 'emits kanban.card.reordered with source and target stage IDs for cross-stage reorder' do
@@ -954,7 +1162,7 @@ RSpec.describe 'Kanban Cards API', type: :request do
       end.not_to change(ConversationKanbanState, :count)
 
       expect(response).to have_http_status(:success)
-      expect(card.reload).to have_attributes(kanban_stage_id: next_stage.id, position: 1)
+      expect(card.reload).to have_attributes(kanban_stage_id: next_stage.id, position: 1000)
       expect(state.reload).to have_attributes(kanban_stage_id: stage.id, position: 1)
     end
 
@@ -1100,7 +1308,7 @@ RSpec.describe 'Kanban Cards API', type: :request do
             as: :json
 
       expect(response).to have_http_status(:success)
-      expect(stable_card.reload).to have_attributes(kanban_stage_id: next_stage.id, position: 1)
+      expect(stable_card.reload).to have_attributes(kanban_stage_id: next_stage.id, position: 1000)
       expect(legacy_card.reload).to have_attributes(kanban_stage_id: stage.id, position: 1)
     end
 
@@ -1186,6 +1394,10 @@ RSpec.describe 'Kanban Cards API', type: :request do
         conversation: conversation
       }.merge(attributes)
     )
+  end
+
+  def stage_card_ids(target_stage)
+    KanbanCard.where(kanban_stage: target_stage).active.ordered.pluck(:id)
   end
 
   def stable_card_url(target_card, suffix: nil)

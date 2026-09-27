@@ -1,16 +1,18 @@
 class Waha::ReplyContextResolver
   PREVIEW_LENGTH = 140
+  # Waha::MediaAttacher's engine-aware kinds, mapped onto the attachment file
+  # types the ghost quote labels ("Photo", "Audio", ...).
+  QUOTED_MEDIA_TYPES = { 'image' => 'image', 'sticker' => 'image', 'audio' => 'audio', 'video' => 'video', 'document' => 'file' }.freeze
 
   pattr_initialize [:channel!, :payload!, :conversation!]
 
   # WhatsApp keeps a single message across N edits; every edit mirror anchors to
-  # the original via edit_of, so the head (latest version) is what the contact
+  # the original through its mapping, so the head (latest version) is what the contact
   # actually saw when replying.
   def self.family_head(inbox, original)
-    inbox.messages
-         .where("additional_attributes->>'edit_of' = ?", original.source_id)
-         .order(:created_at)
-         .last || original
+    Waha::Anchoring.family(inbox, original)
+                   .order(:created_at)
+                   .last || original
   end
 
   # Resolves a payload's replyTo into content_attributes for the new message:
@@ -30,16 +32,15 @@ class Waha::ReplyContextResolver
   def stanza
     # replyTo.id carries only the stanza (e.g. 3EB061968E662308B1CAEE), but we
     # normalize just like the dedupe path in case a full source_id shows up.
-    @stanza ||= payload.dig('replyTo', 'id').to_s.split('_').last
+    @stanza ||= Waha::Anchoring.stanza_of(payload.dig('replyTo', 'id'))
   end
 
   def original
     return @original if defined?(@original)
 
-    # Prefer a match in the current conversation: stanzas are only guaranteed
-    # unique per chat, so this minimizes cross-chat false positives.
-    scope = inbox.messages.where('source_id LIKE ?', "%_#{stanza}")
-    @original = scope.find_by(conversation_id: conversation.id) || scope.first
+    quoted_id = payload.dig('replyTo', 'id')
+    chat_jid = Waha::Anchoring.chat_jid_of(quoted_id) || conversation.contact_inbox.source_id
+    @original = Waha::Anchoring.find_message(channel, quoted_id, chat_jid)
   end
 
   def head
@@ -48,12 +49,12 @@ class Waha::ReplyContextResolver
 
   def resolve_local
     if head.conversation_id == conversation.id
-      { in_reply_to: head.id, in_reply_to_external_id: original.source_id }
+      { in_reply_to: head.id, in_reply_to_external_id: Waha::Anchoring.external_anchor_source_id(original) }
     else
       # Inbox in "create new conversations" mode: the frontend can't render or
       # scroll to a message from another conversation, so feed a ghost quote
       # with the real local content instead.
-      { in_reply_to_external_id: original.source_id, in_reply_to_snapshot: snapshot_of(head) }
+      { in_reply_to_external_id: Waha::Anchoring.external_anchor_source_id(original), in_reply_to_snapshot: snapshot_of(head) }
     end
   end
 
@@ -66,10 +67,32 @@ class Waha::ReplyContextResolver
       in_reply_to_external_id: stanza,
       in_reply_to_snapshot: {
         body: payload.dig('replyTo', 'body'),
-        author: resolve_participant(payload.dig('replyTo', 'participant')),
-        media_type: ('file' if payload.dig('replyTo', 'hasMedia'))
+        author: snapshot_author,
+        media_type: quoted_media_type
       }.compact
     }
+  end
+
+  # A status reply quotes a story this inbox never imports, so the ghost quote
+  # is the only place the agent sees it: label it so the quote is not mistaken
+  # for an ordinary earlier message from the same person.
+  def snapshot_author
+    author = resolve_participant(payload.dig('replyTo', 'participant'))
+    return author unless Waha::StatusContext.reply_to_status?(payload)
+    return I18n.t('conversations.messages.waha_status_reply.quoted_author_unknown') if author.blank?
+
+    I18n.t('conversations.messages.waha_status_reply.quoted_author', author: author)
+  end
+
+  # GOWS puts the quoted message's own proto under `replyTo._data`, so quoted
+  # media can be labelled precisely instead of as a generic file.
+  def quoted_media_type
+    return nil unless payload.dig('replyTo', 'hasMedia')
+
+    quoted = payload.dig('replyTo', '_data')
+    quoted = {} unless quoted.is_a?(Hash)
+    kind = Waha::MediaAttacher::DATA_MESSAGE_KINDS.find { |key, _| quoted[key].present? }&.last
+    QUOTED_MEDIA_TYPES.fetch(kind, 'file')
   end
 
   def snapshot_of(message)
@@ -89,20 +112,10 @@ class Waha::ReplyContextResolver
   def resolve_participant(jid)
     return if jid.blank?
 
-    contact = find_contact(jid)
-    return contact.name if contact&.name.present?
+    name = Waha::ParticipantResolver.new(channel: channel, jid: jid).perform.name
+    return name if name.present?
 
-    digits = jid.to_s.split('@').first.to_s.split(':').first
-    jid.to_s.end_with?('@lid') ? jid : "+#{digits}"
-  end
-
-  def find_contact(jid)
-    if jid.to_s.end_with?('@lid')
-      channel.account.contacts.where("additional_attributes->>'lid' = ?", jid).first
-    else
-      digits = jid.to_s.split('@').first.to_s.split(':').first
-      channel.account.contacts.find_by(phone_number: "+#{digits}")
-    end
+    Waha::Jid.lid?(jid) ? jid : "+#{Waha::Jid.digits(jid)}"
   end
 
   def inbox

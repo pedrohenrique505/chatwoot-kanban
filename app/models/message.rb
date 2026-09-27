@@ -85,6 +85,9 @@ class Message < ApplicationRecord
   attr_accessor :preserve_waiting_since
   # Transient delay (in seconds) before SendReplyJob runs, used to stagger delivery order
   attr_accessor :send_reply_delay
+  # Recent WAHA gap recovery should retain the normal incoming-message path while
+  # leaving an actively handled or snoozed conversation in its current state.
+  attr_accessor :preserve_conversation_status
   # Set by the WAHA history importer: marks a backdated message so its create
   # commit skips every live side effect (send_reply, automation, webhooks,
   # notifications, broadcast) — the import is fully silent.
@@ -139,6 +142,13 @@ class Message < ApplicationRecord
   has_many :attachments, dependent: :destroy, autosave: true, before_add: :validate_attachments_limit
   has_one :csat_survey_response, dependent: :destroy_async
   has_many :notifications, as: :primary_actor, dependent: :destroy_async
+  has_many :waha_message_mappings, dependent: :destroy_async
+  # autosave: false — WahaDeliveryAttempt's lifecycle is managed entirely through
+  # its own explicit writes (WahaDeliveryAttempt#claim!/#confirm_sent!, or
+  # create_or_find_by! in Waha::SendOnWahaService). Without this, saving the
+  # message after a create_or_find_by! rescue-and-retry can autosave a stale,
+  # never-persisted association target left over from the failed create.
+  has_one :waha_delivery_attempt, dependent: :destroy_async, autosave: false
 
   after_create_commit :execute_after_create_commit_callbacks
 
@@ -151,6 +161,7 @@ class Message < ApplicationRecord
 
   def push_event_data
     data = attributes.symbolize_keys.merge(
+      source_id: presented_source_id,
       created_at: created_at.to_i,
       message_type: message_type_before_type_cast,
       conversation_id: conversation&.display_id,
@@ -163,8 +174,9 @@ class Message < ApplicationRecord
 
   def conversation_push_event_data
     {
+      inbox_id: conversation.inbox_id,
       assignee_id: conversation.assignee_id,
-      unread_count: conversation.unread_incoming_messages.count,
+      unread_count: conversation.unread_incoming_messages_count,
       last_activity_at: conversation.last_activity_at.to_i,
       contact_inbox: { source_id: conversation.contact_inbox.source_id }
     }
@@ -197,10 +209,17 @@ class Message < ApplicationRecord
       message_type: message_type,
       private: private,
       sender: sender.try(:webhook_data),
-      source_id: source_id
+      source_id: presented_source_id
     }
     data[:attachments] = attachments.map(&:push_event_data) if attachments.present?
     data
+  end
+
+  # Keep the public source_id field while WAHA stores correlation only in mappings.
+  def presented_source_id
+    return source_id unless inbox.waha?
+
+    Waha::Anchoring.external_anchor_source_id(self) || waha_message_mappings.resolved.where(event_type: :call).pick(:provider_id)
   end
 
   # Method to get content with survey URL for outgoing channel delivery
@@ -416,6 +435,7 @@ class Message < ApplicationRecord
   def reopen_conversation
     return if conversation.muted?
     return unless incoming?
+    return if preserve_conversation_status && !conversation.resolved?
 
     conversation.open! if conversation.snoozed?
 

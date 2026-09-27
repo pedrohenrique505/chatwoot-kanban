@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
     conversation_display_type: 'expanded',
     is_contact_sidebar_open: true,
     is_copilot_panel_open: false,
+    is_embedded_conversation_list_open: false,
   },
   forwardedSearchState: vi.fn(),
 }));
@@ -56,6 +57,8 @@ const mountView = ({
   routeName = 'inbox_conversation',
   conversationId = 1,
   replaceImpl = () => Promise.resolve(),
+  backRoute = null,
+  assigneeType = 'all',
 } = {}) => {
   const store = createStoreMock(currentChat);
   const router = { replace: vi.fn(replaceImpl), push: vi.fn() };
@@ -64,6 +67,8 @@ const mountView = ({
     props: {
       conversationId,
       inboxId: 2,
+      backRoute,
+      assigneeType,
     },
     global: {
       plugins: [store],
@@ -73,6 +78,8 @@ const mountView = ({
       },
       stubs: {
         ChatList: {
+          name: 'ChatList',
+          props: ['assigneeType'],
           template: '<section data-testid="chat-list" />',
         },
         ConversationBox: {
@@ -126,6 +133,7 @@ describe('ConversationView', () => {
     mocks.uiSettings.conversation_display_type = 'expanded';
     mocks.uiSettings.is_contact_sidebar_open = true;
     mocks.uiSettings.is_copilot_panel_open = false;
+    mocks.uiSettings.is_embedded_conversation_list_open = false;
   });
 
   it('renders search panel beside conversation box and replaces profile sidebar', async () => {
@@ -154,6 +162,14 @@ describe('ConversationView', () => {
     );
   });
 
+  it('forwards the assigned-to-me filter to the conversation list', () => {
+    const { wrapper } = mountView({ assigneeType: 'me' });
+
+    expect(
+      wrapper.getComponent({ name: 'ChatList' }).props('assigneeType')
+    ).toBe('me');
+  });
+
   it('forwards search panel close and state events to ConversationBox', async () => {
     const { wrapper } = mountView();
 
@@ -177,7 +193,43 @@ describe('ConversationView', () => {
     ).toBe(false);
   });
 
+  it('does not mount ChatList in embedded mode while the list is collapsed', () => {
+    const { wrapper } = mountView({
+      backRoute: { name: 'kanban_board_show' },
+    });
+
+    expect(wrapper.find('[data-testid="chat-list"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="conversation-box"]').exists()).toBe(
+      true
+    );
+  });
+
+  it('mounts ChatList in embedded mode once the list is expanded', () => {
+    mocks.uiSettings.is_embedded_conversation_list_open = true;
+
+    const { wrapper } = mountView({
+      backRoute: { name: 'kanban_board_show' },
+    });
+
+    expect(wrapper.find('[data-testid="chat-list"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="conversation-box"]').exists()).toBe(
+      true
+    );
+  });
+
   describe('syncRouteWithArchivedState', () => {
+    it('does not redirect archived conversations in embedded mode', () => {
+      const { wrapper, router } = mountView({
+        currentChat: { id: 1, inbox_id: 2 },
+        conversationId: 1,
+        backRoute: { name: 'kanban_board_show' },
+      });
+
+      wrapper.vm.syncRouteWithArchivedState(1752230400);
+
+      expect(router.replace).not.toHaveBeenCalled();
+    });
+
     it('redirects to the archived route (with accountId) when the open conversation gets archived elsewhere', () => {
       // Covers both a live archive from another agent and opening an
       // already-archived conversation through a generic/old URL: both

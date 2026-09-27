@@ -12,6 +12,77 @@ namespace :kanban_cards do
   task audit_parity: :environment do
     exit(false) unless KanbanCardsParityAudit.new.run
   end
+
+  desc 'Seed card creation events for cards created before the timeline'
+  task seed_creation_events: :environment do
+    puts "Seeded #{KanbanCardsCreationEventsBackfill.new.run} card creation events."
+  end
+
+  desc 'Seed won/lost events for cards sitting in a terminal stage without one'
+  task seed_terminal_events: :environment do
+    puts "Seeded #{KanbanCardsTerminalEventsBackfill.new.run} terminal events."
+  end
+end
+
+class KanbanCardsCreationEventsBackfill
+  def run
+    created_count = 0
+
+    KanbanCard.find_each do |card|
+      next if card.kanban_card_events.exists?(event_type: 'card_created')
+
+      KanbanCards::RecordEventService.card_created(card, created_at: card.created_at)
+      created_count += 1
+    end
+
+    created_count
+  end
+end
+
+# Every won/lost report reads the event log, while the board reads the card's own
+# stage. A card that reached Ganho/Perdido without an event - seeded, imported, or
+# moved before the timeline existed - counts on the board and is missing from every
+# chart. `stage_entered_at` is when it got there, so it dates the event.
+class KanbanCardsTerminalEventsBackfill
+  def run
+    KanbanBoard.find_each.sum { |kanban_board| backfill_board(kanban_board) }
+  end
+
+  private
+
+  def backfill_board(kanban_board)
+    event_types = terminal_event_types(kanban_board)
+    return 0 if event_types.empty?
+
+    created_count = 0
+    kanban_board.kanban_cards.active.where(kanban_stage_id: event_types.keys).find_each do |card|
+      event_type = event_types.fetch(card.kanban_stage_id)
+      next if card.kanban_card_events.exists?(event_type: event_type)
+
+      record_event(card, event_type)
+      created_count += 1
+    end
+
+    created_count
+  end
+
+  def terminal_event_types(kanban_board)
+    {
+      kanban_board.won_stage_id => 'won',
+      kanban_board.lost_stage_id => 'lost'
+    }.reject { |stage_id, _event_type| stage_id.blank? }
+  end
+
+  def record_event(card, event_type)
+    reason = card.kanban_reason
+
+    KanbanCards::RecordEventService.call(
+      card: card,
+      event_type: event_type,
+      metadata: { stage_id: card.kanban_stage_id, reason_id: reason&.id, reason_title: reason&.title },
+      created_at: card.stage_entered_at
+    )
+  end
 end
 
 class KanbanCardsParityAudit

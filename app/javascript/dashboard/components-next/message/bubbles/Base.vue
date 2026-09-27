@@ -9,7 +9,7 @@ import { useI18n } from 'vue-i18n';
 
 import MessageFormatter from 'shared/helpers/MessageFormatter.js';
 import { BUS_EVENTS } from 'shared/constants/busEvents';
-import { MESSAGE_VARIANTS, ORIENTATION } from '../constants';
+import { MESSAGE_TYPES, MESSAGE_VARIANTS, ORIENTATION } from '../constants';
 
 const props = defineProps({
   hideMeta: { type: Boolean, default: false },
@@ -18,9 +18,32 @@ const props = defineProps({
   bare: { type: Boolean, default: false },
 });
 
-const { variant, orientation, inReplyTo, shouldGroupWithNext, isOwnMessage } =
-  useMessageContext();
+const {
+  variant,
+  orientation,
+  inReplyTo,
+  shouldGroupWithNext,
+  isOwnMessage,
+  contentAttributes,
+  messageType,
+} = useMessageContext();
 const { t } = useI18n();
+
+// WAHA tags every group message with the participant who actually sent it
+// (contentAttributes.senderName/participantPhone, camelized by MessageList's
+// useCamelCase before this ever reaches props) — the "sender" on the message
+// itself is the group contact, not the individual member.
+const groupSenderLabel = computed(() => {
+  if (messageType.value !== MESSAGE_TYPES.INCOMING) return '';
+
+  const { senderName: name, participantPhone: phone } =
+    contentAttributes.value || {};
+  if (!phone) return '';
+
+  return name
+    ? t('CONVERSATION.WAHA_GROUP_SENDER', { name, phone })
+    : t('CONVERSATION.WAHA_GROUP_SENDER_NO_NAME', { phone });
+});
 
 // Other agents' bubbles use a deeper step on the same blue scale so they
 // read darker in light mode and lighter in dark mode than the current
@@ -150,6 +173,9 @@ const replyToPreview = computed(() => {
         v-dompurify-html="replyToPreview"
         class="prose prose-bubble line-clamp-2"
       />
+    </div>
+    <div v-if="groupSenderLabel" class="text-xs font-medium mb-1">
+      {{ groupSenderLabel }}
     </div>
     <slot />
     <MessageMeta

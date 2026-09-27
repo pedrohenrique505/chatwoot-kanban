@@ -12,7 +12,11 @@ import {
   handleWhatsappRemoteEnd,
   isLocalWhatsappCall,
 } from 'dashboard/composables/useWhatsappCallSession';
-import { VOICE_CALL_PROVIDERS } from 'dashboard/helper/inbox';
+import {
+  VOICE_CALL_PROVIDERS,
+  isInboxVisibleInAllConversations,
+  isInboxIdVisibleInAllConversations,
+} from 'dashboard/helper/inbox';
 import { VOICE_CALL_DIRECTION } from 'dashboard/components-next/message/constants';
 import { FEATURE_FLAGS } from 'dashboard/featureFlags';
 
@@ -330,11 +334,14 @@ class ActionCableConnector extends BaseActionCableConnector {
     this.app.$store.dispatch('accounts/get', { silent: true });
   };
 
+  allConversationInboxes = () => {
+    return this.app.$store.getters['inboxes/getInboxes'] || [];
+  };
+
   eligibleAllConversationInboxIds = () => {
-    const inboxes = this.app.$store.getters['inboxes/getInboxes'] || [];
     return new Set(
-      inboxes
-        .filter(inbox => inbox.show_in_all_conversations !== false)
+      this.allConversationInboxes()
+        .filter(isInboxVisibleInAllConversations)
         .map(inbox => Number(inbox.id))
     );
   };
@@ -356,7 +363,12 @@ class ActionCableConnector extends BaseActionCableConnector {
     const inboxId = conversation?.inbox_id || conversation?.inboxId;
     if (!inboxId) return false;
 
-    return !this.eligibleAllConversationInboxIds().has(Number(inboxId));
+    // Runs for every message event, so match the single inbox instead of
+    // building a Set of all eligible ones.
+    return !isInboxIdVisibleInAllConversations(
+      this.allConversationInboxes(),
+      inboxId
+    );
   };
 
   onCacheInvalidate = async data => {

@@ -15,6 +15,7 @@ describe('#KanbanBoardsAPI', () => {
     expect(kanbanBoards).toHaveProperty('deleteStage');
     expect(kanbanBoards).toHaveProperty('getBoards');
     expect(kanbanBoards).toHaveProperty('showBoard');
+    expect(kanbanBoards).toHaveProperty('getSummary');
     expect(kanbanBoards).toHaveProperty('getSettings');
     expect(kanbanBoards).toHaveProperty('updateSettings');
     expect(kanbanBoards).toHaveProperty('importExistingConversations');
@@ -22,13 +23,20 @@ describe('#KanbanBoardsAPI', () => {
     expect(kanbanBoards).toHaveProperty('createConversationCard');
     expect(kanbanBoards).toHaveProperty('getStageCards');
     expect(kanbanBoards).toHaveProperty('createManualCard');
+    expect(kanbanBoards).toHaveProperty('bulkAction');
+    expect(kanbanBoards).toHaveProperty('lookupCards');
     expect(kanbanBoards).toHaveProperty('updateCardById');
     expect(kanbanBoards).toHaveProperty('showCardById');
     expect(kanbanBoards).toHaveProperty('updateCardDetailsById');
     expect(kanbanBoards).toHaveProperty('getCardLabels');
     expect(kanbanBoards).toHaveProperty('updateCardLabels');
     expect(kanbanBoards).toHaveProperty('reorderCardById');
+    expect(kanbanBoards).toHaveProperty('moveCardToBoard');
     expect(kanbanBoards).toHaveProperty('deleteCardById');
+    expect(kanbanBoards).toHaveProperty('getCardNotes');
+    expect(kanbanBoards).toHaveProperty('createCardNote');
+    expect(kanbanBoards).toHaveProperty('updateCardNote');
+    expect(kanbanBoards).toHaveProperty('deleteCardNote');
   });
 
   describe('API calls', () => {
@@ -149,6 +157,16 @@ describe('#KanbanBoardsAPI', () => {
       );
     });
 
+    it('#getSummary with config', () => {
+      const config = { params: { assignee_ids: [7] } };
+      kanbanBoards.getSummary(2, config);
+
+      expect(axiosMock.get).toHaveBeenCalledWith(
+        '/api/v1/accounts/1/kanban_boards/2/summary',
+        config
+      );
+    });
+
     it('#getSettings', () => {
       kanbanBoards.getSettings(2);
 
@@ -234,6 +252,29 @@ describe('#KanbanBoardsAPI', () => {
       );
     });
 
+    it('#bulkAction', () => {
+      const payload = {
+        operation: 'assign',
+        card_ids: [501, 502],
+        payload: { assignee_ids: [9] },
+      };
+      kanbanBoards.bulkAction(2, payload);
+
+      expect(axiosMock.post).toHaveBeenCalledWith(
+        '/api/v1/accounts/1/kanban_boards/2/cards/bulk_actions',
+        payload
+      );
+    });
+
+    it('#lookupCards', () => {
+      kanbanBoards.lookupCards(2, { contactId: 123 });
+
+      expect(axiosMock.get).toHaveBeenCalledWith(
+        '/api/v1/accounts/1/kanban_boards/2/cards/lookup',
+        { params: { contact_id: 123 }, signal: undefined }
+      );
+    });
+
     it('#updateCardById', () => {
       const payload = { card: { kanban_stage_id: 4 } };
       kanbanBoards.updateCardById(2, 501, payload);
@@ -249,6 +290,42 @@ describe('#KanbanBoardsAPI', () => {
 
       expect(axiosMock.get).toHaveBeenCalledWith(
         '/api/v1/accounts/1/kanban_boards/2/cards/by_id/501'
+      );
+    });
+    it('#getCardNotes', () => {
+      kanbanBoards.getCardNotes(2, 501, { limit: 20 });
+
+      expect(axiosMock.get).toHaveBeenCalledWith(
+        '/api/v1/accounts/1/kanban_boards/2/cards/by_id/501/notes',
+        { params: { limit: 20 } }
+      );
+    });
+
+    it('#createCardNote', () => {
+      const payload = new FormData();
+      kanbanBoards.createCardNote(2, 501, payload);
+
+      expect(axiosMock.post).toHaveBeenCalledWith(
+        '/api/v1/accounts/1/kanban_boards/2/cards/by_id/501/notes',
+        payload
+      );
+    });
+
+    it('#updateCardNote', () => {
+      const payload = { content: 'Updated note' };
+      kanbanBoards.updateCardNote(2, 501, 9, payload);
+
+      expect(axiosMock.patch).toHaveBeenCalledWith(
+        '/api/v1/accounts/1/kanban_boards/2/cards/by_id/501/notes/9',
+        { note: payload }
+      );
+    });
+
+    it('#deleteCardNote', () => {
+      kanbanBoards.deleteCardNote(2, 501, 9);
+
+      expect(axiosMock.delete).toHaveBeenCalledWith(
+        '/api/v1/accounts/1/kanban_boards/2/cards/by_id/501/notes/9'
       );
     });
 
@@ -339,6 +416,15 @@ describe('#KanbanBoardsAPI', () => {
 
       expect(axiosMock.patch).toHaveBeenCalledWith(
         '/api/v1/accounts/1/kanban_boards/2/cards/by_id/501/reorder',
+        payload
+      );
+    });
+    it('#moveCardToBoard', () => {
+      const payload = { target_kanban_board_id: 3, kanban_stage_id: 8 };
+      kanbanBoards.moveCardToBoard(2, 501, payload);
+
+      expect(axiosMock.patch).toHaveBeenCalledWith(
+        '/api/v1/accounts/1/kanban_boards/2/cards/by_id/501/move',
         payload
       );
     });

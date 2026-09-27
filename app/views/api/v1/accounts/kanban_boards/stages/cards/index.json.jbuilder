@@ -11,8 +11,10 @@ json.cards do
 end
 
 json.pagination do
-  json.limit @limit
-  json.has_more @result.has_more
-  json.next_cursor @result.next_cursor
-  json.total_count @result.total_count
+  json.partial!(
+    'api/v1/accounts/kanban_boards/stage_pagination',
+    formats: [:json],
+    result: @result,
+    limit: @limit
+  )
 end

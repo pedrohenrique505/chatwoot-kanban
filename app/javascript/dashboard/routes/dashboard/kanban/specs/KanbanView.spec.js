@@ -7,13 +7,8 @@ import { emitter } from 'shared/helpers/mitt';
 import { BUS_EVENTS } from 'shared/constants/busEvents';
 import { useAlert } from 'dashboard/composables';
 import kanbanBoardsModule from 'dashboard/store/modules/kanbanBoards';
-import {
-  KANBAN_STAGE_COLOR_OPTIONS,
-  getKanbanStageBodyColorClass,
-  getKanbanStageColorClass,
-} from 'dashboard/helper/kanbanStageColors';
-import enKanbanMessages from 'dashboard/i18n/locale/en/kanban.json';
-import ptBRKanbanMessages from 'dashboard/i18n/locale/pt_BR/kanban.json';
+import { DEFAULT_KANBAN_STAGE_COLOR } from 'dashboard/helper/kanbanStageColors';
+import { FLUSH_DELAY } from 'dashboard/composables/useKanbanRealtimeBuffer';
 
 const mockPush = vi.fn();
 const mockReplace = vi.fn();
@@ -44,9 +39,10 @@ vi.mock('dashboard/composables', () => ({
 }));
 
 vi.mock('dashboard/helper/URLHelper', () => ({
-  frontendURL: path => path,
+  frontendURL: (path, params) =>
+    `/app/${path}${params ? `?${new URLSearchParams(params)}` : ''}`,
   conversationUrl: ({ accountId, id }) =>
-    `/app/accounts/${accountId}/conversations/${id}`,
+    `accounts/${accountId}/conversations/${id}`,
 }));
 
 vi.mock('shared/helpers/mitt', () => ({
@@ -61,6 +57,7 @@ vi.mock('dashboard/api/kanbanBoards', () => ({
     get: vi.fn(),
     show: vi.fn(),
     showBoard: vi.fn(),
+    getSummary: vi.fn(),
     reorderStage: vi.fn(),
     reorderCardById: vi.fn(),
     create: vi.fn(),
@@ -70,7 +67,12 @@ vi.mock('dashboard/api/kanbanBoards', () => ({
     updateStage: vi.fn(),
     deleteStage: vi.fn(),
     getStageCards: vi.fn(),
+    getConversationCards: vi.fn(() =>
+      Promise.resolve({ data: { payload: [] } })
+    ),
     deleteCardById: vi.fn(),
+    updateCardAssignees: vi.fn(),
+    updateCardDetailsById: vi.fn(),
     showCardById: vi.fn(),
   },
 }));
@@ -91,17 +93,22 @@ const buildAgents = () => [
 const createTestStore = (
   role = 'agent',
   inboxRecords = buildInboxes(),
-  agentRecords = buildAgents()
+  agentRecords = buildAgents(),
+  currentUserId = 7
 ) =>
   createStore({
     getters: {
       getCurrentRole: () => role,
+      getCurrentUserID: () => currentUserId,
+      getCurrentUser: () => ({ id: currentUserId, role }),
     },
     modules: {
       auth: {
         namespaced: true,
         getters: {
           getCurrentRole: () => role,
+          getCurrentUserID: () => currentUserId,
+          getCurrentUser: () => ({ id: currentUserId, role }),
         },
       },
       kanbanBoards: { namespaced: true, ...kanbanBoardsModule },
@@ -124,6 +131,18 @@ const createTestStore = (
         },
         getters: {
           getAgents: state => state.records,
+        },
+        actions: {
+          get: vi.fn(),
+        },
+      },
+      labels: {
+        namespaced: true,
+        state: {
+          records: [],
+        },
+        getters: {
+          getLabels: state => state.records,
         },
         actions: {
           get: vi.fn(),
@@ -225,9 +244,21 @@ const mountView = async (
   KanbanBoardsAPI.show.mockResolvedValue({
     data: boardResponse,
   });
+  KanbanBoardsAPI.getSummary.mockResolvedValue({
+    data: {
+      open: { count: 1, value: '10.0' },
+      won_this_month: { count: 1, value: '10.0' },
+      lost_this_month: { count: 1, value: '10.0' },
+      average_ticket: '10.00',
+      currency: 'BRL',
+    },
+  });
   KanbanBoardsAPI.reorderStage.mockResolvedValue({ data: {} });
   KanbanBoardsAPI.reorderCardById.mockResolvedValue({ data: {} });
   KanbanBoardsAPI.deleteCardById.mockResolvedValue({ data: {} });
+  KanbanBoardsAPI.updateCardAssignees.mockResolvedValue({
+    data: { payload: [] },
+  });
   KanbanBoardsAPI.getStageCards.mockResolvedValue({
     data: { cards: [], pagination: buildPagination() },
   });
@@ -241,6 +272,11 @@ const mountView = async (
     global: {
       plugins: [store],
       stubs: {
+        KanbanStageColumn: false,
+        KanbanStageHeader: false,
+        KanbanBoardHeader: false,
+        KanbanBoardIdentityBar: false,
+        KanbanStageDraft: false,
         OnClickOutside: {
           template: '<div><slot /></div>',
         },
@@ -250,17 +286,17 @@ const mountView = async (
           template:
             '<button v-bind="$attrs" class="btn-stub" @click="$emit(\'click\')">{{ label }}<slot /></button>',
         },
-        TagMultiSelectComboBox: {
-          name: 'TagMultiSelectComboBox',
-          props: [
-            'modelValue',
-            'options',
-            'disabled',
-            'placeholder',
-            'searchPlaceholder',
-            'emptyState',
-          ],
-          template: '<div class="tag-multi-select-stub" />',
+        KanbanFilterMenu: {
+          name: 'KanbanFilterMenu',
+          props: ['modelValue', 'inboxOptions', 'agentOptions', 'activeCount'],
+          template:
+            '<div class="kanban-filter-menu-stub"><span v-if="activeCount" data-testid="kanban-filter-count">{{ activeCount }}</span></div>',
+        },
+        KanbanStageMenu: {
+          name: 'KanbanStageMenu',
+          props: ['stage'],
+          template:
+            '<button data-testid="kanban-stage-menu-add-card" @click="$emit(\'addCard\')" />',
         },
         KanbanConversationCard: {
           name: 'KanbanConversationCard',
@@ -269,12 +305,30 @@ const mountView = async (
               type: Object,
               required: true,
             },
+            isBusy: {
+              type: Boolean,
+              default: false,
+            },
+            stages: {
+              type: Array,
+              default: () => [],
+            },
+            assignableUsers: {
+              type: Array,
+              default: () => [],
+            },
           },
           template: '<div class="kanban-card-stub" />',
         },
-        KanbanOpportunityDetailsModal: {
-          name: 'KanbanOpportunityDetailsModal',
-          props: ['boardId', 'cardId'],
+        KanbanOpportunityPanel: {
+          name: 'KanbanOpportunityPanel',
+          props: [
+            'boardId',
+            'cardId',
+            'stages',
+            'moveToStage',
+            'hasBlockingDialog',
+          ],
           template:
             '<div class="kanban-opportunity-modal-stub" data-board-id="{{ boardId }}" data-card-id="{{ cardId }}" />',
         },
@@ -337,7 +391,7 @@ const mountView = async (
             },
           },
           template:
-            '<div><slot /><slot name="item" v-for="(element, index) in draggableItems" :key="index" :element="element" :index="index" /></div>',
+            '<div><slot name="item" v-for="(element, index) in draggableItems" :key="index" :element="element" :index="index" /><slot name="footer" /></div>',
         },
         WootDeleteModal: {
           name: 'WootDeleteModal',
@@ -372,22 +426,40 @@ const findCardDraggables = wrapper =>
     .findAllComponents({ name: 'Draggable' })
     .filter(draggable => draggable.props('handle') === '.card-drag-handle');
 
-const findAddItemButtons = wrapper =>
-  wrapper.findAll('[data-testid="kanban-add-item-button"]');
+const findEmptyStageDraggable = wrapper =>
+  findCardDraggables(wrapper).find(
+    draggable => draggable.props('list').length === 0
+  );
+
+const findEmptyStageAddCard = wrapper =>
+  findEmptyStageDraggable(wrapper).find(
+    '[data-testid="kanban-empty-stage-add-card"]'
+  );
+
+const expectEmptyStageState = (wrapper, { hasAddCard, label }) => {
+  expect(findEmptyStageAddCard(wrapper).exists()).toBe(hasAddCard);
+  expect(findEmptyStageDraggable(wrapper).text()).toContain(label);
+};
+
+const findStageMenus = wrapper =>
+  wrapper.findAllComponents({ name: 'KanbanStageMenu' });
+const addCardFromStageMenu = (wrapper, index) =>
+  findStageMenus(wrapper)
+    [index].find('[data-testid="kanban-stage-menu-add-card"]')
+    .trigger('click');
 
 const findLoadMoreButtons = wrapper =>
   wrapper.findAll('[data-testid="kanban-load-more-cards"]');
 
 const findAddItemPicker = wrapper =>
   wrapper.findComponent({ name: 'KanbanOpportunityPicker' });
-const findInboxFilter = wrapper =>
-  wrapper.findAllComponents({ name: 'TagMultiSelectComboBox' })[0];
-const findAgentFilter = wrapper =>
-  wrapper.findAllComponents({ name: 'TagMultiSelectComboBox' })[1];
-const findInboxFilterWrapper = wrapper =>
-  wrapper.find('[data-testid="kanban-inbox-filter"]');
-const findAgentFilterWrapper = wrapper =>
-  wrapper.find('[data-testid="kanban-agent-filter"]');
+const findFilterMenu = wrapper =>
+  wrapper.findComponent({ name: 'KanbanFilterMenu' });
+const updateBoardFilters = (wrapper, filters) =>
+  findFilterMenu(wrapper).vm.$emit('update:modelValue', {
+    ...findFilterMenu(wrapper).props('modelValue'),
+    ...filters,
+  });
 
 const getStageCardIds = wrapper =>
   findCardDraggables(wrapper).map(draggable =>
@@ -401,14 +473,19 @@ const getKanbanRealtimeHandler = () =>
 
 const emitKanbanRealtimeEvent = async payload => {
   getKanbanRealtimeHandler()(payload);
+  await vi.advanceTimersByTimeAsync(FLUSH_DELAY);
   await flushPromises();
   await nextTick();
 };
 
+beforeEach(() => {
+  sessionStorage.clear();
+});
+
 describe('KanbanView realtime events', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.useRealTimers();
+    vi.useFakeTimers();
   });
 
   it('registers the kanban realtime bus listener on mount', async () => {
@@ -556,6 +633,24 @@ describe('KanbanView realtime events', () => {
     expect(KanbanBoardsAPI.getStageCards).toHaveBeenCalledWith(10, 200, {
       limit: 20,
     });
+  });
+
+  it('refreshes the funnel summary when a card moves between stages', async () => {
+    await mountView();
+    KanbanBoardsAPI.getSummary.mockClear();
+
+    await emitKanbanRealtimeEvent({
+      event: 'kanban.card.reordered',
+      data: {
+        board_id: 10,
+        card_id: 501,
+        source_stage_id: 100,
+        target_stage_id: 200,
+      },
+    });
+
+    // Two stages refreshed, but the summary they share is only fetched once.
+    expect(KanbanBoardsAPI.getSummary).toHaveBeenCalledTimes(1);
   });
 
   it('fetches card detail and patches visible cards for card updated events', async () => {
@@ -1066,11 +1161,9 @@ describe('KanbanView drag and drop', () => {
     expect(KanbanBoardsAPI.show).toHaveBeenCalledWith(10, undefined);
   });
 
-  it('persists cross-stage card drag using target stage and position payload', async () => {
+  it('persists cross-stage card drag using target stage and anchor payload', async () => {
     const wrapper = await mountView();
-    const targetStageCardDraggable = findCardDraggables(wrapper).find(
-      draggable => draggable.props('list').length === 0
-    );
+    const targetStageCardDraggable = findEmptyStageDraggable(wrapper);
 
     expect(targetStageCardDraggable).toBeDefined();
 
@@ -1090,54 +1183,96 @@ describe('KanbanView drag and drop', () => {
     expect(KanbanBoardsAPI.reorderCardById).toHaveBeenCalledWith(10, 501, {
       card: {
         kanban_stage_id: 200,
-        position: 1,
+        after_card_id: null,
       },
     });
   });
 
   it('makes the empty stage card list a configured drop zone', async () => {
     const wrapper = await mountView();
-    const emptyStageDraggable = findCardDraggables(wrapper).find(
-      draggable => draggable.props('list').length === 0
-    );
+    const emptyStageDraggable = findEmptyStageDraggable(wrapper);
 
-    expect(emptyStageDraggable.classes()).toContain('min-h-48');
-    expect(emptyStageDraggable.text()).toContain('KANBAN.EMPTY_CARDS');
-    expect(
-      emptyStageDraggable.find('[data-testid="kanban-add-item-panel"]').exists()
-    ).toBe(false);
-    expect(emptyStageDraggable.props('emptyInsertThreshold')).toBe(5);
+    // flex-1 makes the drop zone span the whole column instead of the former
+    // min-h-48 island, so the dead space below the cards accepts drops too.
+    expect(emptyStageDraggable.classes()).toContain('flex-1');
+    expect(emptyStageDraggable.props('emptyInsertThreshold')).toBe(30);
     expect(emptyStageDraggable.props('swapThreshold')).toBe(0.65);
     expect(emptyStageDraggable.props('invertedSwapThreshold')).toBe(1);
     expect(emptyStageDraggable.props('fallbackOnBody')).toBe(true);
     expect(emptyStageDraggable.props('forceFallback')).toBe(true);
   });
 
-  it('shows an add item action in each stage body', async () => {
+  it('shows the add card action in an empty stage', async () => {
     const wrapper = await mountView();
-    const addItemButtons = findAddItemButtons(wrapper);
 
-    expect(addItemButtons).toHaveLength(2);
-    expect(addItemButtons[0].attributes('aria-label')).toBe(
-      'KANBAN.ACTIONS.ADD_ITEM'
-    );
-    expect(addItemButtons[1].attributes('aria-label')).toBe(
-      'KANBAN.ACTIONS.ADD_ITEM'
+    expect(findEmptyStageAddCard(wrapper).attributes('data-stage-id')).toBe(
+      '200'
     );
   });
 
-  it('opens and toggles the inline add item picker for the selected stage', async () => {
+  it('opens the opportunity picker for an empty stage', async () => {
     const wrapper = await mountView();
-    const addItemButtons = findAddItemButtons(wrapper);
 
-    await addItemButtons[1].trigger('click');
+    await findEmptyStageAddCard(wrapper).trigger('click');
+
+    expect(findAddItemPicker(wrapper).props('kanbanStageId')).toBe(200);
+  });
+
+  it('shows a filtered empty state instead of the add card action', async () => {
+    const wrapper = await mountView();
+
+    await updateBoardFilters(wrapper, { inboxIds: [1] });
+    await flushPromises();
+
+    expectEmptyStageState(wrapper, {
+      hasAddCard: false,
+      label: 'KANBAN.EMPTY_CARDS_FILTERED',
+    });
+  });
+
+  it('shows a filtered empty state while a search is active', async () => {
+    const wrapper = await mountView();
+
+    wrapper.vm.$.setupState.activeSearchTerm = 'sale';
+    await nextTick();
+
+    expectEmptyStageState(wrapper, {
+      hasAddCard: false,
+      label: 'KANBAN.EMPTY_CARDS_FILTERED',
+    });
+  });
+
+  it('does not show the add card action for an empty terminal stage', async () => {
+    const wrapper = await mountView(
+      buildBoardResponse([], { won_stage_id: 200 })
+    );
+
+    expectEmptyStageState(wrapper, {
+      hasAddCard: false,
+      label: 'KANBAN.EMPTY_CARDS',
+    });
+  });
+
+  it('renders a list action menu in each stage header', async () => {
+    const wrapper = await mountView();
+    const stageMenus = findStageMenus(wrapper);
+
+    expect(stageMenus).toHaveLength(2);
+    expect(stageMenus[0].props('stage').id).toBe(100);
+    expect(stageMenus[1].props('stage').id).toBe(200);
+  });
+
+  it('opens and toggles the manual picker from the selected list menu', async () => {
+    const wrapper = await mountView();
+
+    await addCardFromStageMenu(wrapper, 1);
 
     let picker = findAddItemPicker(wrapper);
     expect(picker.exists()).toBe(true);
     expect(picker.props('kanbanBoardId')).toBe(10);
     expect(picker.props('kanbanStageId')).toBe(200);
 
-    await addItemButtons[1].trigger('click');
+    await addCardFromStageMenu(wrapper, 1);
 
     picker = findAddItemPicker(wrapper);
     expect(picker.exists()).toBe(false);
@@ -1146,7 +1281,7 @@ describe('KanbanView drag and drop', () => {
   it('closes the inline add item picker using the close action', async () => {
     const wrapper = await mountView();
 
-    await findAddItemButtons(wrapper)[0].trigger('click');
+    await addCardFromStageMenu(wrapper, 0);
     expect(findAddItemPicker(wrapper).exists()).toBe(true);
 
     await findAddItemPicker(wrapper).vm.$emit('close');
@@ -1157,7 +1292,7 @@ describe('KanbanView drag and drop', () => {
   it('renders the add item picker outside card draggables', async () => {
     const wrapper = await mountView();
 
-    await findAddItemButtons(wrapper)[0].trigger('click');
+    await addCardFromStageMenu(wrapper, 0);
 
     const cardDraggables = findCardDraggables(wrapper);
     expect(findAddItemPicker(wrapper).exists()).toBe(true);
@@ -1171,7 +1306,7 @@ describe('KanbanView drag and drop', () => {
   it('does not trigger card drag behavior from add item controls', async () => {
     const wrapper = await mountView();
 
-    await findAddItemButtons(wrapper)[0].trigger('click');
+    await addCardFromStageMenu(wrapper, 0);
     await findAddItemPicker(wrapper).vm.$emit('close');
 
     expect(KanbanBoardsAPI.reorderCardById).not.toHaveBeenCalled();
@@ -1186,7 +1321,7 @@ describe('KanbanView drag and drop', () => {
     });
     const wrapper = await mountView();
 
-    await findAddItemButtons(wrapper)[0].trigger('click');
+    await addCardFromStageMenu(wrapper, 0);
     KanbanBoardsAPI.show.mockClear();
 
     await findAddItemPicker(wrapper).vm.$emit('created');
@@ -1227,7 +1362,7 @@ describe('KanbanView drag and drop', () => {
       })
     );
 
-    await findAddItemButtons(wrapper)[0].trigger('click');
+    await addCardFromStageMenu(wrapper, 0);
     await findAddItemPicker(wrapper).vm.$emit('created');
     await flushPromises();
 
@@ -1244,18 +1379,12 @@ describe('KanbanView drag and drop', () => {
   it('opens the manual picker for every board', async () => {
     const wrapper = await mountView();
 
-    await findAddItemButtons(wrapper)[0].trigger('click');
+    await addCardFromStageMenu(wrapper, 0);
 
     expect(findAddItemPicker(wrapper).exists()).toBe(true);
   });
 
-  it('persists same-stage card reorder using updated position', async () => {
-    KanbanBoardsAPI.getStageCards.mockResolvedValueOnce({
-      data: {
-        cards: [buildCard({ id: 501, kanban_stage_id: 100, position: 1 })],
-        pagination: buildPagination({ total_count: 1 }),
-      },
-    });
+  it('persists same-stage card reorder using a null anchor', async () => {
     const wrapper = await mountView();
     const sourceStageCardDraggable = findCardDraggables(wrapper)[0];
 
@@ -1275,23 +1404,21 @@ describe('KanbanView drag and drop', () => {
     expect(KanbanBoardsAPI.reorderCardById).toHaveBeenCalledWith(10, 501, {
       card: {
         kanban_stage_id: 100,
-        position: 1,
+        after_card_id: null,
       },
     });
-    expect(KanbanBoardsAPI.getStageCards).toHaveBeenCalledWith(10, 100, {
-      limit: 20,
-    });
+    // The drop already put the card where it belongs, so a successful move refetches
+    // nothing: reloading both columns to redraw the same cards is the loading state
+    // this optimistic path exists to remove.
+    expect(KanbanBoardsAPI.getStageCards).not.toHaveBeenCalled();
     expect(KanbanBoardsAPI.show).toHaveBeenCalledTimes(1);
   });
 
   it('persists populated-to-populated stage card move', async () => {
-    KanbanBoardsAPI.getStageCards.mockImplementation((boardId, stageId) => ({
-      data: {
-        cards: [buildCard({ id: stageId, kanban_stage_id: stageId })],
-        pagination: buildPagination({ total_count: 1 }),
-      },
-    }));
     const wrapper = await mountView(buildBoardResponse([buildCard()]));
+    const { stages } = wrapper.vm.$.setupState;
+    const sourceCardsCount = stages[0].cardsCount;
+    const targetCardsCount = stages[1].cardsCount;
     const targetStageCardDraggable = findCardDraggables(wrapper)[1];
 
     targetStageCardDraggable.vm.$emit('change', {
@@ -1310,16 +1437,81 @@ describe('KanbanView drag and drop', () => {
     expect(KanbanBoardsAPI.reorderCardById).toHaveBeenCalledWith(10, 501, {
       card: {
         kanban_stage_id: 200,
-        position: 2,
+        after_card_id: 502,
       },
     });
-    expect(KanbanBoardsAPI.getStageCards).toHaveBeenCalledWith(10, 100, {
-      limit: 20,
-    });
-    expect(KanbanBoardsAPI.getStageCards).toHaveBeenCalledWith(10, 200, {
-      limit: 20,
-    });
+    expect(KanbanBoardsAPI.getStageCards).not.toHaveBeenCalled();
+    // Both headers settle locally instead of waiting for a refetch of either column.
+    expect(wrapper.vm.$.setupState.stages[0].cardsCount).toBe(
+      sourceCardsCount - 1
+    );
+    expect(wrapper.vm.$.setupState.stages[1].cardsCount).toBe(
+      targetCardsCount + 1
+    );
     expect(KanbanBoardsAPI.show).toHaveBeenCalledTimes(1);
+  });
+  it('persists filtered card drag using the card above the destination as anchor', async () => {
+    const wrapper = await mountView(
+      buildBoardResponse([
+        buildCard({ id: 700, kanban_stage_id: 200, position: 4 }),
+        buildCard({ id: 501, kanban_stage_id: 100, position: 1 }),
+        buildCard({ id: 701, kanban_stage_id: 200, position: 9 }),
+      ])
+    );
+    wrapper.vm.$.setupState.activeSearchTerm = 'sale';
+    await nextTick();
+
+    const targetStageCardDraggable = findCardDraggables(wrapper)[1];
+    expect(targetStageCardDraggable.props('disabled')).toBe(false);
+
+    targetStageCardDraggable.vm.$emit('change', {
+      added: {
+        element: {
+          id: 501,
+          conversationId: 123,
+          kanbanStageId: 100,
+          position: 1,
+        },
+        newIndex: 1,
+      },
+    });
+    await flushPromises();
+
+    expect(KanbanBoardsAPI.reorderCardById).toHaveBeenCalledWith(10, 501, {
+      card: {
+        kanban_stage_id: 200,
+        after_card_id: 700,
+      },
+    });
+  });
+
+  it('persists filtered card drag to the top with a null anchor', async () => {
+    const wrapper = await mountView(
+      buildBoardResponse([buildCard({ id: 700, kanban_stage_id: 200 })])
+    );
+    wrapper.vm.$.setupState.activeSearchTerm = 'sale';
+    await nextTick();
+
+    const targetStageCardDraggable = findCardDraggables(wrapper)[1];
+    targetStageCardDraggable.vm.$emit('change', {
+      added: {
+        element: {
+          id: 501,
+          conversationId: 123,
+          kanbanStageId: 100,
+          position: 1,
+        },
+        newIndex: 0,
+      },
+    });
+    await flushPromises();
+
+    expect(KanbanBoardsAPI.reorderCardById).toHaveBeenCalledWith(10, 501, {
+      card: {
+        kanban_stage_id: 200,
+        after_card_id: null,
+      },
+    });
   });
 
   it('ignores source removed card drag events', async () => {
@@ -1433,6 +1625,137 @@ describe('KanbanView drag and drop', () => {
     });
     expect(KanbanBoardsAPI.show).toHaveBeenCalledTimes(1);
   });
+  it('moves a card to the top of another regular stage', async () => {
+    const wrapper = await mountView();
+    const cardComponent = wrapper.findComponent({
+      name: 'KanbanConversationCard',
+    });
+
+    cardComponent.vm.$emit('moveToStage', { id: 501, kanbanStageId: 100 }, 200);
+    await flushPromises();
+
+    expect(KanbanBoardsAPI.reorderCardById).toHaveBeenCalledWith(10, 501, {
+      card: {
+        kanban_stage_id: 200,
+        after_card_id: null,
+      },
+    });
+    expect(KanbanBoardsAPI.getStageCards).toHaveBeenCalledWith(10, 100, {
+      limit: 20,
+    });
+    expect(KanbanBoardsAPI.getStageCards).toHaveBeenCalledWith(10, 200, {
+      limit: 20,
+    });
+    expect(useAlert).toHaveBeenCalledWith('KANBAN.CARD.MOVE_SUCCESS');
+  });
+
+  it('updates visible assignees without reloading the board', async () => {
+    KanbanBoardsAPI.updateCardAssignees.mockResolvedValueOnce({
+      data: {
+        payload: [{ id: 8, name: 'Grace Hopper', avatar_url: 'grace.png' }],
+      },
+    });
+    const wrapper = await mountView();
+    const cardComponent = wrapper.findComponent({
+      name: 'KanbanConversationCard',
+    });
+    KanbanBoardsAPI.show.mockClear();
+
+    cardComponent.vm.$emit(
+      'assignAgent',
+      { id: 501, kanbanStageId: 100, assignees: [] },
+      8
+    );
+    await flushPromises();
+
+    expect(KanbanBoardsAPI.updateCardAssignees).toHaveBeenCalledWith(10, 501, [
+      8,
+    ]);
+    expect(findCardDraggables(wrapper)[0].props('list')[0].assignees).toEqual([
+      { id: 8, name: 'Grace Hopper', avatarUrl: 'grace.png' },
+    ]);
+    expect(KanbanBoardsAPI.show).not.toHaveBeenCalled();
+    expect(useAlert).toHaveBeenCalledWith('KANBAN.CARD.ASSIGN_SUCCESS');
+  });
+
+  it('patches the card priority without touching the conversation priority', async () => {
+    KanbanBoardsAPI.updateCardDetailsById.mockResolvedValueOnce({
+      data: { id: 501, priority: 'urgent' },
+    });
+    const wrapper = await mountView();
+    const cardComponent = wrapper.findComponent({
+      name: 'KanbanConversationCard',
+    });
+
+    cardComponent.vm.$emit(
+      'updatePriority',
+      { id: 501, kanbanStageId: 100, priority: 'low' },
+      'urgent'
+    );
+    await flushPromises();
+
+    expect(KanbanBoardsAPI.updateCardDetailsById).toHaveBeenCalledWith(
+      10,
+      501,
+      { priority: 'urgent' }
+    );
+    const patchedCard = findCardDraggables(wrapper)[0].props('list')[0];
+    expect(patchedCard.cardPriority).toBe('urgent');
+    expect(patchedCard.priority).toBeUndefined();
+  });
+
+  it('rolls the card priority back when the update fails', async () => {
+    KanbanBoardsAPI.updateCardDetailsById.mockRejectedValueOnce(
+      new Error('nope')
+    );
+    const wrapper = await mountView(
+      buildBoardResponse([
+        buildCard({ id: 501, kanban_stage_id: 100, card_priority: 'low' }),
+      ])
+    );
+    const cardComponent = wrapper.findComponent({
+      name: 'KanbanConversationCard',
+    });
+
+    cardComponent.vm.$emit(
+      'updatePriority',
+      { id: 501, kanbanStageId: 100, cardPriority: 'low' },
+      'urgent'
+    );
+    await flushPromises();
+
+    expect(findCardDraggables(wrapper)[0].props('list')[0].cardPriority).toBe(
+      'low'
+    );
+  });
+
+  it('only marks the card with an active action as busy', async () => {
+    let resolveAssignment;
+    KanbanBoardsAPI.updateCardAssignees.mockReturnValueOnce(
+      new Promise(resolve => {
+        resolveAssignment = resolve;
+      })
+    );
+    const wrapper = await mountView(
+      buildBoardResponse([buildCard({ id: 502, kanban_stage_id: 200 })])
+    );
+    const cards = wrapper.findAllComponents({
+      name: 'KanbanConversationCard',
+    });
+
+    cards[0].vm.$emit(
+      'assignAgent',
+      { id: 501, kanbanStageId: 100, assignees: [] },
+      8
+    );
+    await nextTick();
+
+    expect(cards[0].props('isBusy')).toBe(true);
+    expect(cards[1].props('isBusy')).toBe(false);
+
+    resolveAssignment({ data: { payload: [] } });
+    await flushPromises();
+  });
 
   it('opens opportunity modal on card click', async () => {
     const wrapper = await mountView();
@@ -1444,7 +1767,7 @@ describe('KanbanView drag and drop', () => {
     await nextTick();
 
     const modal = wrapper.findComponent({
-      name: 'KanbanOpportunityDetailsModal',
+      name: 'KanbanOpportunityPanel',
     });
     expect(modal.exists()).toBe(true);
   });
@@ -1463,8 +1786,36 @@ describe('KanbanView drag and drop', () => {
     await flushPromises();
 
     expect(mockPush).toHaveBeenCalledWith({
-      path: '/app/accounts/1/conversations/123',
+      name: 'kanban_board_conversation',
+      params: {
+        accountId: '1',
+        boardId: 10,
+        conversationId: 123,
+      },
+      query: { card_id: 501 },
+      state: { fromEmbedded: false },
     });
+  });
+
+  it('opens the standalone conversation URL in a new tab on ctrl-click', async () => {
+    const wrapper = await mountView();
+    const cardComponent = wrapper.findComponent({
+      name: 'KanbanConversationCard',
+    });
+
+    cardComponent.vm.$emit(
+      'openConversation',
+      { id: 501, conversationId: 123 },
+      { ctrlKey: true }
+    );
+    await flushPromises();
+
+    expect(window.open).toHaveBeenCalledWith(
+      'http://localhost:3000/app/accounts/1/conversations/123?card_id=501',
+      '_blank',
+      'noopener,noreferrer'
+    );
+    expect(mockPush).not.toHaveBeenCalled();
   });
 
   it('does not navigate from card openConversation event without conversationId', async () => {
@@ -1479,7 +1830,7 @@ describe('KanbanView drag and drop', () => {
     expect(mockPush).not.toHaveBeenCalled();
   });
 
-  it('passes boardId and cardId to opportunity modal', async () => {
+  it('passes boardId and cardId to opportunity panel', async () => {
     const wrapper = await mountView();
     const cardComponent = wrapper.findComponent({
       name: 'KanbanConversationCard',
@@ -1489,13 +1840,13 @@ describe('KanbanView drag and drop', () => {
     await nextTick();
 
     const modal = wrapper.findComponent({
-      name: 'KanbanOpportunityDetailsModal',
+      name: 'KanbanOpportunityPanel',
     });
     expect(modal.props('boardId')).toBe(10);
     expect(modal.props('cardId')).toBe(501);
   });
 
-  it('hides the outer opportunity modal close button', async () => {
+  it('mounts the opportunity panel without an outer modal', async () => {
     const wrapper = await mountView();
     const cardComponent = wrapper.findComponent({
       name: 'KanbanConversationCard',
@@ -1504,12 +1855,13 @@ describe('KanbanView drag and drop', () => {
     cardComponent.vm.$emit('openDetails', { id: 501, conversationId: 123 }, {});
     await nextTick();
 
-    const modal = wrapper.findComponent({ name: 'WootModal' });
-    expect(modal.props('showCloseButton')).toBe(false);
-    expect(modal.props('size')).toBe('modal-big');
+    expect(
+      wrapper.findComponent({ name: 'KanbanOpportunityPanel' }).exists()
+    ).toBe(true);
+    expect(wrapper.findComponent({ name: 'WootModal' }).exists()).toBe(false);
   });
 
-  it('closes opportunity modal and clears selected card', async () => {
+  it('closes opportunity panel and clears selected card', async () => {
     const wrapper = await mountView();
     const cardComponent = wrapper.findComponent({
       name: 'KanbanConversationCard',
@@ -1519,13 +1871,13 @@ describe('KanbanView drag and drop', () => {
     await nextTick();
 
     const modal = wrapper.findComponent({
-      name: 'KanbanOpportunityDetailsModal',
+      name: 'KanbanOpportunityPanel',
     });
     modal.vm.$emit('close');
     await nextTick();
 
     expect(
-      wrapper.findComponent({ name: 'KanbanOpportunityDetailsModal' }).exists()
+      wrapper.findComponent({ name: 'KanbanOpportunityPanel' }).exists()
     ).toBe(false);
   });
 
@@ -1540,7 +1892,7 @@ describe('KanbanView drag and drop', () => {
     await nextTick();
 
     const modal = wrapper.findComponent({
-      name: 'KanbanOpportunityDetailsModal',
+      name: 'KanbanOpportunityPanel',
     });
     KanbanBoardsAPI.show.mockClear();
     modal.vm.$emit('updated', {
@@ -1573,7 +1925,7 @@ describe('KanbanView drag and drop', () => {
     await nextTick();
 
     const modal = wrapper.findComponent({
-      name: 'KanbanOpportunityDetailsModal',
+      name: 'KanbanOpportunityPanel',
     });
     KanbanBoardsAPI.show.mockClear();
     modal.vm.$emit('updated');
@@ -1585,7 +1937,7 @@ describe('KanbanView drag and drop', () => {
     expect(KanbanBoardsAPI.show).not.toHaveBeenCalled();
   });
 
-  it('opens conversation in a new tab on modal openConversation event', async () => {
+  it('opens conversation in the same tab on modal openConversation event', async () => {
     const wrapper = await mountView();
     const cardComponent = wrapper.findComponent({
       name: 'KanbanConversationCard',
@@ -1595,22 +1947,25 @@ describe('KanbanView drag and drop', () => {
     await nextTick();
 
     const modal = wrapper.findComponent({
-      name: 'KanbanOpportunityDetailsModal',
+      name: 'KanbanOpportunityPanel',
     });
-    modal.vm.$emit('openConversation', { conversationId: 123 });
+    modal.vm.$emit('openConversation', { id: 501, conversationId: 123 });
     await flushPromises();
 
-    expect(window.open).toHaveBeenCalledWith(
-      'http://localhost:3000/app/accounts/1/conversations/123',
-      '_blank',
-      'noopener,noreferrer'
-    );
-    expect(mockPush).not.toHaveBeenCalledWith({
-      path: '/app/accounts/1/conversations/123',
+    expect(window.open).not.toHaveBeenCalled();
+    expect(mockPush).toHaveBeenCalledWith({
+      name: 'kanban_board_conversation',
+      params: {
+        accountId: '1',
+        boardId: 10,
+        conversationId: 123,
+      },
+      query: { card_id: 501 },
+      state: { fromEmbedded: false },
     });
   });
 
-  it('keeps modal open after opening conversation in a new tab', async () => {
+  it('navigates straight to the conversation without asking to save', async () => {
     const wrapper = await mountView();
     const cardComponent = wrapper.findComponent({
       name: 'KanbanConversationCard',
@@ -1618,16 +1973,38 @@ describe('KanbanView drag and drop', () => {
 
     cardComponent.vm.$emit('openDetails', { id: 501, conversationId: 123 }, {});
     await nextTick();
-
-    const modal = wrapper.findComponent({
-      name: 'KanbanOpportunityDetailsModal',
-    });
+    const modal = wrapper.findComponent({ name: 'KanbanOpportunityPanel' });
     modal.vm.$emit('openConversation', { conversationId: 123 });
+    await nextTick();
+
+    expect(mockPush).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'kanban_board_conversation' })
+    );
+    expect(
+      wrapper.findComponent({ name: 'KanbanOpportunityPanel' }).exists()
+    ).toBe(false);
+  });
+
+  it('opens a card deep link from the opportunity menu', async () => {
+    const wrapper = await mountView();
+    const cardComponent = wrapper.findComponent({
+      name: 'KanbanConversationCard',
+    });
+
+    cardComponent.vm.$emit('openDetails', { id: 501, conversationId: 123 }, {});
+    await nextTick();
+    const modal = wrapper.findComponent({ name: 'KanbanOpportunityPanel' });
+    modal.vm.$emit('openFunnel', {
+      id: 501,
+      kanbanBoardId: 10,
+    });
     await flushPromises();
 
-    expect(
-      wrapper.findComponent({ name: 'KanbanOpportunityDetailsModal' }).exists()
-    ).toBe(true);
+    expect(mockPush).toHaveBeenCalledWith({
+      name: 'kanban_board_show',
+      params: { accountId: '1', boardId: 10 },
+      query: { card_id: 501 },
+    });
   });
 });
 
@@ -1647,8 +2024,21 @@ describe('KanbanView header navigation', () => {
     ).toContain('Sales Board');
   });
 
-  it('lists visible boards in the dropdown', async () => {
+  it('navigates to the funnels overview from the back button', async () => {
     const wrapper = await mountView();
+
+    await wrapper
+      .find('[data-testid="kanban-back-to-overview"]')
+      .trigger('click');
+
+    expect(mockPush).toHaveBeenCalledWith({
+      name: 'kanban_boards',
+      params: { accountId: '1' },
+    });
+  });
+
+  it('lists visible boards in the dropdown', async () => {
+    const wrapper = await mountView({ role: 'administrator' });
 
     await wrapper
       .find('[data-testid="kanban-board-switcher"]')
@@ -1662,42 +2052,40 @@ describe('KanbanView header navigation', () => {
     expect(dropdown.text()).toContain('Renewals Board');
     expect(dropdown.text()).toContain('KANBAN.OVERVIEW.CREATE_BOARD');
     expect(
-      wrapper.find('[data-testid="kanban-add-board-inline-toggle"]').exists()
+      wrapper.find('[data-testid="kanban-board-switcher-create-new"]').exists()
     ).toBe(true);
   });
 
-  it('shows an inline input and confirm button to create a board from the dropdown', async () => {
-    const wrapper = await mountView();
+  it('cancels a board rename and leaves the name alone', async () => {
+    const wrapper = await mountView({ role: 'administrator' });
+    const header = wrapper.findComponent({ name: 'KanbanBoardHeader' });
+
+    header.vm.$emit('startBoardRename', { id: 10, name: 'Sales Board' });
+    await nextTick();
+    expect(header.props('renamingBoardId')).toBe(10);
+    expect(header.props('renameValue')).toBe('Sales Board');
+
+    header.vm.$emit('cancelBoardRename');
+    await nextTick();
+
+    expect(header.props('renamingBoardId')).toBe(null);
+    expect(KanbanBoardsAPI.update).not.toHaveBeenCalled();
+  });
+
+  it('navigates to the create board form from the dropdown', async () => {
+    const wrapper = await mountView({ role: 'administrator' });
 
     await wrapper
       .find('[data-testid="kanban-board-switcher"]')
       .trigger('click');
     await wrapper
-      .find('[data-testid="kanban-add-board-inline-toggle"]')
+      .find('[data-testid="kanban-board-switcher-create-new"]')
       .trigger('click');
 
-    expect(
-      wrapper.find('[data-testid="kanban-add-board-inline-input"]').exists()
-    ).toBe(true);
-
-    await wrapper
-      .find('[data-testid="kanban-add-board-inline-input"]')
-      .setValue('Support Board');
-    KanbanBoardsAPI.create.mockResolvedValueOnce({
-      data: { id: 99, name: 'Support Board' },
+    expect(mockPush).toHaveBeenCalledWith({
+      name: 'kanban_board_create_form',
+      params: { accountId: '1' },
     });
-    await wrapper
-      .find('[data-testid="kanban-board-switcher-dropdown"] form')
-      .trigger('submit');
-    await flushPromises();
-
-    expect(KanbanBoardsAPI.create).toHaveBeenCalledWith({
-      kanban_board: { name: 'Support Board', position: 2 },
-    });
-    expect(mockPush).not.toHaveBeenCalled();
-    expect(
-      wrapper.find('[data-testid="kanban-board-switcher-dropdown"]').exists()
-    ).toBe(true);
   });
 
   it('does not render a create board button in the board header', async () => {
@@ -1739,7 +2127,9 @@ describe('KanbanView header navigation', () => {
     );
 
     expect(createStageButton.exists()).toBe(true);
-    expect(createStageButton.text()).toContain('KANBAN.ACTIONS.CREATE_STAGE');
+    expect(createStageButton.attributes('aria-label')).toBe(
+      'KANBAN.ACTIONS.CREATE_STAGE'
+    );
   });
 
   it('does not render the old separate create stage form', async () => {
@@ -1777,26 +2167,50 @@ describe('KanbanView header navigation', () => {
     });
   });
 
-  it('creates a stage with Nova etapa when that temporary name is available', async () => {
-    mockT.mockImplementation(key => {
-      const translations = {
-        'KANBAN.ACTIONS.NEW_STAGE_NAME': 'Nova etapa',
-      };
-      return translations[key] || key;
-    });
+  it('returns to the kanban overview when the board is inaccessible', async () => {
     const wrapper = await mountView();
+    KanbanBoardsAPI.show.mockRejectedValueOnce({
+      response: { status: 404 },
+    });
+
+    await wrapper.vm.$.setupState.showBoard(99);
+
+    expect(mockReplace).toHaveBeenCalledWith({
+      name: 'kanban_boards',
+      params: { accountId: '1' },
+    });
+  });
+
+  it('opens a blank stage draft without creating a stage', async () => {
+    const wrapper = await mountView();
+
+    await wrapper
+      .find('[data-testid="kanban-create-stage-toggle"]')
+      .trigger('click');
+    await nextTick();
+
+    expect(KanbanBoardsAPI.createStage).not.toHaveBeenCalled();
+    expect(
+      wrapper.find('[data-testid="kanban-new-stage-name-input"]').exists()
+    ).toBe(true);
+    expect(
+      wrapper.find('[data-testid="kanban-new-stage-name-input"]').element.value
+    ).toBe('');
+    expect(
+      wrapper.find('[data-testid="kanban-create-stage-confirm"]').exists()
+    ).toBe(true);
+  });
+
+  it('creates a stage only after confirming its draft name', async () => {
     const newStage = {
+      ...buildBoardResponse().stages[1],
       id: 300,
-      name: 'Nova etapa',
-      active: true,
-      position: 1,
+      name: 'Negotiation',
       cards: [],
       cards_count: 0,
-      pagination: buildPagination(),
     };
-    KanbanBoardsAPI.createStage.mockResolvedValue({
-      data: newStage,
-    });
+    const wrapper = await mountView();
+    KanbanBoardsAPI.createStage.mockResolvedValue({ data: newStage });
     KanbanBoardsAPI.show.mockResolvedValueOnce({
       data: buildBoardResponse([], {
         stages: [newStage, ...buildBoardResponse().stages],
@@ -1807,171 +2221,54 @@ describe('KanbanView header navigation', () => {
     await wrapper
       .find('[data-testid="kanban-create-stage-toggle"]')
       .trigger('click');
+    await wrapper
+      .find('[data-testid="kanban-new-stage-name-input"]')
+      .setValue('Negotiation');
+    await wrapper.find('form').trigger('submit');
     await flushPromises();
-    await nextTick();
 
     expect(KanbanBoardsAPI.createStage).toHaveBeenCalledWith(10, {
       stage: {
-        name: 'Nova etapa',
-        color: 'slate',
+        name: 'Negotiation',
+        color: '#8B8D98',
         position: 2,
       },
     });
     expect(KanbanBoardsAPI.show).toHaveBeenCalledWith(10, undefined);
-    const stageNameInput = wrapper
-      .findAll('input')
-      .find(
-        input =>
-          input.attributes('placeholder') ===
-          'KANBAN.ACTIONS.STAGE_NAME_PLACEHOLDER'
-      );
-    expect(stageNameInput).toBeDefined();
-    expect(stageNameInput.exists()).toBe(true);
-    expect(stageNameInput.element.value).toBe('Nova etapa');
-    expect(wrapper.text()).not.toContain('KANBAN.ACTIONS.CREATE_STAGE_CONFIRM');
+    expect(
+      wrapper.find('[data-testid="kanban-new-stage-name-input"]').exists()
+    ).toBe(false);
   });
 
-  it('creates a stage with Nova etapa (1) when Nova etapa already exists', async () => {
-    mockT.mockImplementation(key => {
-      const translations = {
-        'KANBAN.ACTIONS.NEW_STAGE_NAME': 'Nova etapa',
-      };
-      return translations[key] || key;
-    });
-    const existingStage = {
-      ...buildBoardResponse().stages[0],
-      id: 100,
-      name: 'Nova etapa',
-    };
-    const newStage = {
-      ...buildBoardResponse().stages[1],
-      id: 300,
-      name: 'Nova etapa (1)',
-      cards: [],
-      cards_count: 0,
-    };
-    const wrapper = await mountView(
-      buildBoardResponse([], {
-        stages: [existingStage, buildBoardResponse().stages[1]],
-      })
-    );
-    KanbanBoardsAPI.createStage.mockResolvedValue({ data: newStage });
-    KanbanBoardsAPI.show.mockResolvedValueOnce({
-      data: buildBoardResponse([], {
-        stages: [newStage, existingStage, buildBoardResponse().stages[1]],
-      }),
-    });
+  it('cancels a stage draft without creating a stage', async () => {
+    const wrapper = await mountView();
 
     await wrapper
       .find('[data-testid="kanban-create-stage-toggle"]')
       .trigger('click');
-    await flushPromises();
-
-    expect(KanbanBoardsAPI.createStage).toHaveBeenCalledWith(10, {
-      stage: {
-        name: 'Nova etapa (1)',
-        color: 'slate',
-        position: 2,
-      },
-    });
-  });
-
-  it('creates a stage with Nova etapa (2) when previous temporary names exist', async () => {
-    mockT.mockImplementation(key => {
-      const translations = {
-        'KANBAN.ACTIONS.NEW_STAGE_NAME': 'Nova etapa',
-      };
-      return translations[key] || key;
-    });
-    const existingStages = [
-      { ...buildBoardResponse().stages[0], id: 100, name: 'Nova etapa' },
-      { ...buildBoardResponse().stages[1], id: 200, name: 'Nova etapa (1)' },
-    ];
-    const newStage = {
-      ...buildBoardResponse().stages[1],
-      id: 300,
-      name: 'Nova etapa (2)',
-      cards: [],
-      cards_count: 0,
-    };
-    const wrapper = await mountView(
-      buildBoardResponse([], {
-        stages: existingStages,
-      })
-    );
-    KanbanBoardsAPI.createStage.mockResolvedValue({ data: newStage });
-    KanbanBoardsAPI.show.mockResolvedValueOnce({
-      data: buildBoardResponse([], {
-        stages: [newStage, ...existingStages],
-      }),
-    });
-
     await wrapper
-      .find('[data-testid="kanban-create-stage-toggle"]')
-      .trigger('click');
-    await flushPromises();
-
-    expect(KanbanBoardsAPI.createStage).toHaveBeenCalledWith(10, {
-      stage: {
-        name: 'Nova etapa (2)',
-        color: 'slate',
-        position: 2,
-      },
-    });
-  });
-
-  it('uses the translated English base for temporary stage names', async () => {
-    mockT.mockImplementation(key => {
-      const translations = {
-        'KANBAN.ACTIONS.NEW_STAGE_NAME': 'New stage',
-      };
-      return translations[key] || key;
-    });
-    const existingStage = {
-      ...buildBoardResponse().stages[0],
-      id: 100,
-      name: 'New stage',
-    };
-    const newStage = {
-      ...buildBoardResponse().stages[1],
-      id: 300,
-      name: 'New stage (1)',
-      cards: [],
-      cards_count: 0,
-    };
-    const wrapper = await mountView(
-      buildBoardResponse([], {
-        stages: [existingStage, buildBoardResponse().stages[1]],
-      })
-    );
-    KanbanBoardsAPI.createStage.mockResolvedValue({ data: newStage });
-    KanbanBoardsAPI.show.mockResolvedValueOnce({
-      data: buildBoardResponse([], {
-        stages: [newStage, existingStage, buildBoardResponse().stages[1]],
-      }),
-    });
-
+      .find('[data-testid="kanban-new-stage-name-input"]')
+      .setValue('Negotiation');
     await wrapper
-      .find('[data-testid="kanban-create-stage-toggle"]')
+      .find('[data-testid="kanban-create-stage-cancel"]')
       .trigger('click');
-    await flushPromises();
 
-    expect(KanbanBoardsAPI.createStage).toHaveBeenCalledWith(10, {
-      stage: {
-        name: 'New stage (1)',
-        color: 'slate',
-        position: 2,
-      },
-    });
+    expect(KanbanBoardsAPI.createStage).not.toHaveBeenCalled();
+    expect(
+      wrapper.find('[data-testid="kanban-new-stage-name-input"]').exists()
+    ).toBe(false);
+    expect(
+      wrapper.find('[data-testid="kanban-create-stage-draft"]').exists()
+    ).toBe(true);
   });
 
-  it('shows duplicate stage creation errors only as translated toast', async () => {
+  it('keeps a duplicate stage draft open with its name', async () => {
     mockT.mockImplementation(key => {
       const translations = {
-        'KANBAN.ACTIONS.NEW_STAGE_NAME': 'Nova etapa',
-        'KANBAN.ACTIONS.STAGE_NAME_TAKEN': 'Já existe uma etapa com esse nome.',
+        'KANBAN.ACTIONS.STAGE_NAME_TAKEN':
+          'A stage with this name already exists.',
         'KANBAN.ACTIONS.CREATE_STAGE_ERROR':
-          'Não foi possível criar a etapa do kanban.',
+          'Could not create the kanban stage.',
       };
       return translations[key] || key;
     });
@@ -1983,38 +2280,55 @@ describe('KanbanView header navigation', () => {
     await wrapper
       .find('[data-testid="kanban-create-stage-toggle"]')
       .trigger('click');
+    await wrapper
+      .find('[data-testid="kanban-new-stage-name-input"]')
+      .setValue('Stage A');
+    await wrapper.find('form').trigger('submit');
     await flushPromises();
 
-    expect(useAlert).toHaveBeenCalledWith('Já existe uma etapa com esse nome.');
-    expect(wrapper.text()).not.toContain('Name has already been taken');
-    expect(wrapper.text()).not.toContain('Já existe uma etapa com esse nome.');
-    expect(wrapper.find('.bg-n-ruby-2').exists()).toBe(false);
+    expect(useAlert).toHaveBeenCalledWith(
+      'A stage with this name already exists.'
+    );
+    expect(
+      wrapper.find('[data-testid="kanban-new-stage-name-input"]').element.value
+    ).toBe('Stage A');
   });
 
-  it('exposes the expanded stage color palette', () => {
-    expect(KANBAN_STAGE_COLOR_OPTIONS.map(option => option.value)).toEqual([
-      'slate',
-      'blue',
-      'teal',
-      'green',
-      'amber',
-      'orange',
-      'ruby',
-      'rose',
-      'violet',
-      'iris',
-    ]);
+  it('keeps stage editing open and warns when the name is empty', async () => {
+    mockT.mockImplementation(key => {
+      const translations = {
+        'KANBAN.ACTIONS.STAGE_NAME_REQUIRED': 'Enter a name for the stage.',
+      };
+      return translations[key] || key;
+    });
+    const wrapper = await mountView();
+    const stage = buildBoardResponse().stages[0];
+
+    wrapper.vm.$.setupState.startEditingStage(stage);
+    await nextTick();
+    wrapper.vm.$.setupState.stageNames[stage.id] = '';
+    await wrapper.vm.$.setupState.updateStage(stage);
+
+    expect(useAlert).toHaveBeenCalledWith('Enter a name for the stage.');
+    expect(wrapper.vm.$.setupState.editingStageId).toBe(stage.id);
+    expect(KanbanBoardsAPI.updateStage).not.toHaveBeenCalled();
   });
 
-  it('keeps rendering existing stage colors and falls back to slate', () => {
-    expect(getKanbanStageColorClass('blue')).toBe('bg-n-blue-9');
-    expect(getKanbanStageColorClass('unexpected')).toBe('bg-n-slate-9');
-    expect(getKanbanStageBodyColorClass('blue')).toBe(
-      'bg-n-blue-3 dark:bg-n-blue-2'
-    );
-    expect(getKanbanStageBodyColorClass('unexpected')).toBe(
-      'bg-n-slate-3 dark:bg-n-slate-2'
-    );
+  it('clears the stage edit draft when editing is cancelled', async () => {
+    const wrapper = await mountView();
+    const stage = buildBoardResponse().stages[0];
+
+    wrapper.vm.$.setupState.startEditingStage(stage);
+    wrapper.vm.$.setupState.stageNames[stage.id] = 'Changed';
+    wrapper.vm.$.setupState.cancelEditingStage();
+
+    expect(wrapper.vm.$.setupState.editingStageId).toBe(null);
+    expect(wrapper.vm.$.setupState.stageNames[stage.id]).toBeUndefined();
+    expect(wrapper.vm.$.setupState.stageColors[stage.id]).toBeUndefined();
+  });
+
+  it('uses a hexadecimal default stage color', () => {
+    expect(DEFAULT_KANBAN_STAGE_COLOR).toBe('#8B8D98');
   });
 
   it('shows board settings button for administrators', async () => {
@@ -2038,17 +2352,19 @@ describe('KanbanView header navigation', () => {
     );
   });
 
-  it('renders board settings after the agent filter and before the create stage button', async () => {
+  it('renders board settings after the filter menu and before create stage', async () => {
     const wrapper = await mountView(buildBoardResponse(), 'administrator');
     const settingsButton = wrapper.find(
       '[data-testid="kanban-board-settings-button"]'
     );
-    const agentFilter = findAgentFilterWrapper(wrapper);
+    const filterMenu = wrapper.find(
+      '[data-testid="kanban-filter-menu-container"]'
+    );
     const createStageButton = wrapper.find(
       '[data-testid="kanban-create-stage-toggle"]'
     );
 
-    expect(agentFilter.element.nextElementSibling).toBe(settingsButton.element);
+    expect(filterMenu.element.nextElementSibling).toBe(settingsButton.element);
     expect(settingsButton.element.nextElementSibling).toBe(
       createStageButton.element
     );
@@ -2070,31 +2386,27 @@ describe('KanbanView header navigation', () => {
       .trigger('click');
 
     expect(mockPush).toHaveBeenCalledWith({
-      name: 'kanban_board_settings',
+      name: 'kanban_board_edit_form',
       params: { accountId: '1', boardId: 10 },
     });
   });
 
-  it('keeps board header filters compact', async () => {
+  it('renders the unified board filter menu', async () => {
     const wrapper = await mountView();
-    const compactClasses = ['w-48', 'max-w-full', 'flex-none'];
 
-    compactClasses.forEach(className => {
-      expect(findInboxFilterWrapper(wrapper).classes()).toContain(className);
-      expect(findAgentFilterWrapper(wrapper).classes()).toContain(className);
-    });
-
-    expect(findInboxFilterWrapper(wrapper).classes().join(' ')).not.toContain(
-      'tag-multi-select-trigger'
+    expect(findFilterMenu(wrapper).exists()).toBe(true);
+    expect(wrapper.find('[data-testid="kanban-inbox-filter"]').exists()).toBe(
+      false
     );
-    expect(findAgentFilterWrapper(wrapper).classes().join(' ')).not.toContain(
-      'tag-multi-select-trigger'
+    expect(wrapper.find('[data-testid="kanban-agent-filter"]').exists()).toBe(
+      false
     );
   });
 
   it('still opens the board switcher to create a board when only one board is visible', async () => {
     const wrapper = await mountView({
       boards: [{ id: 10, name: 'Sales Board' }],
+      role: 'administrator',
     });
 
     expect(
@@ -2107,7 +2419,7 @@ describe('KanbanView header navigation', () => {
       wrapper.find('[data-testid="kanban-board-switcher-dropdown"]').exists()
     ).toBe(true);
     expect(
-      wrapper.find('[data-testid="kanban-add-board-inline-toggle"]').exists()
+      wrapper.find('[data-testid="kanban-board-switcher-create-new"]').exists()
     ).toBe(true);
   });
 
@@ -2140,7 +2452,7 @@ describe('KanbanView header navigation', () => {
       .find('[data-testid="kanban-board-switcher"]')
       .trigger('click');
     const nameSpan = wrapper.find(
-      '[data-testid="kanban-board-switcher-dropdown"] span'
+      '[data-testid="kanban-board-switcher-dropdown"] button'
     );
     expect(nameSpan.text()).toBe('Sales Board');
   });
@@ -2151,7 +2463,7 @@ describe('KanbanView header navigation', () => {
       .find('[data-testid="kanban-board-switcher"]')
       .trigger('click');
     const nameSpan = wrapper.find(
-      '[data-testid="kanban-board-switcher-dropdown"] span'
+      '[data-testid="kanban-board-switcher-dropdown"] button'
     );
     expect(nameSpan.attributes('title')).toBe('Sales Board');
   });
@@ -2167,7 +2479,7 @@ describe('KanbanView header navigation', () => {
       .find('[data-testid="kanban-board-switcher"]')
       .trigger('click');
     const nameSpan = wrapper.find(
-      '[data-testid="kanban-board-switcher-dropdown"] span'
+      '[data-testid="kanban-board-switcher-dropdown"] button'
     );
     expect(nameSpan.text()).toBe(
       'Very Long Board Name That Exceeds Available Width'
@@ -2181,15 +2493,16 @@ describe('KanbanView header navigation', () => {
   });
 });
 
-describe('KanbanView inbox filter', () => {
+describe('KanbanView filters', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockT.mockImplementation(key => key);
-    vi.useRealTimers();
+    vi.useFakeTimers();
     mockRoute.params.boardId = '10';
+    window.localStorage.clear();
   });
 
-  it('renders only allowed inbox options for selected_inboxes boards', async () => {
+  it('passes board-scoped inbox and agent options to the filter menu', async () => {
     const wrapper = await mountView({
       boardResponse: buildBoardResponse([], {
         inbox_scope_mode: 'selected_inboxes',
@@ -2197,155 +2510,53 @@ describe('KanbanView inbox filter', () => {
       }),
     });
 
-    expect(findInboxFilter(wrapper).props('options')).toEqual([
+    expect(findFilterMenu(wrapper).props('inboxOptions')).toEqual([
       { value: 2, label: 'Sales' },
       { value: 3, label: 'Onboarding' },
     ]);
-  });
-
-  it('refetches the board with inbox_ids when the filter changes', async () => {
-    const wrapper = await mountView();
-
-    KanbanBoardsAPI.show.mockClear();
-    await findInboxFilter(wrapper).vm.$emit('update:modelValue', [2, 2]);
-    await flushPromises();
-
-    expect(KanbanBoardsAPI.show).toHaveBeenCalledWith(10, {
-      params: { inbox_ids: [2] },
-    });
-  });
-
-  it('preserves inbox_ids on load more requests', async () => {
-    const wrapper = await mountView(
-      buildBoardResponse([buildCard()], {
-        stages: [
-          buildBoardResponse().stages[0],
-          {
-            id: 200,
-            name: 'Stage B',
-            active: true,
-            position: 2,
-            cards: [buildCard()],
-            cards_count: 2,
-            pagination: buildPagination({
-              has_more: true,
-              next_cursor: { after_id: 502 },
-            }),
-          },
-        ],
-      })
-    );
-
-    await findInboxFilter(wrapper).vm.$emit('update:modelValue', [2]);
-    await flushPromises();
-    KanbanBoardsAPI.getStageCards.mockClear();
-
-    await findLoadMoreButtonByStageId(wrapper, 200).trigger('click');
-    await flushPromises();
-
-    expect(KanbanBoardsAPI.getStageCards).toHaveBeenCalledWith(10, 200, {
-      limit: 20,
-      cursor: { after_id: 502 },
-      inbox_ids: [2],
-    });
-  });
-
-  it('preserves inbox_ids on realtime refreshes', async () => {
-    const wrapper = await mountView();
-
-    await findInboxFilter(wrapper).vm.$emit('update:modelValue', [2]);
-    await flushPromises();
-    KanbanBoardsAPI.getStageCards.mockClear();
-
-    await emitKanbanRealtimeEvent({
-      event: 'kanban.card.created',
-      data: { board_id: 10, stage_id: 100, card_id: 700 },
-    });
-
-    expect(KanbanBoardsAPI.getStageCards).toHaveBeenCalledWith(10, 100, {
-      limit: 20,
-      inbox_ids: [2],
-    });
-  });
-
-  it('clears the inbox filter when switching boards', async () => {
-    const wrapper = await mountView();
-
-    await findInboxFilter(wrapper).vm.$emit('update:modelValue', [2]);
-    await flushPromises();
-    KanbanBoardsAPI.show.mockResolvedValueOnce({
-      data: buildBoardResponse([], { id: 11, name: 'Renewals Board' }),
-    });
-    KanbanBoardsAPI.show.mockClear();
-    mockRoute.params.boardId = '11';
-    await flushPromises();
-
-    expect(findInboxFilter(wrapper).props('modelValue')).toEqual([]);
-    expect(KanbanBoardsAPI.show).toHaveBeenLastCalledWith(11, undefined);
-  });
-
-  it('removes inbox_ids when the filter is cleared', async () => {
-    const wrapper = await mountView();
-
-    await findInboxFilter(wrapper).vm.$emit('update:modelValue', [2]);
-    await flushPromises();
-    KanbanBoardsAPI.show.mockClear();
-
-    await findInboxFilter(wrapper).vm.$emit('update:modelValue', []);
-    await flushPromises();
-
-    expect(KanbanBoardsAPI.show).toHaveBeenCalledWith(10, undefined);
-  });
-});
-
-describe('KanbanView assignee filter', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mockT.mockImplementation(key => key);
-    vi.useRealTimers();
-    mockRoute.params.boardId = '10';
-  });
-
-  it('renders account agents as filter options', async () => {
-    const wrapper = await mountView();
-
-    expect(findAgentFilter(wrapper).props('options')).toEqual([
+    expect(findFilterMenu(wrapper).props('agentOptions')).toEqual([
       { value: 7, label: 'Ada Lovelace' },
       { value: 8, label: 'Grace Hopper' },
     ]);
-  });
+    expect(wrapper.dispatchSpy).toHaveBeenCalledWith('labels/get');
 
-  it('uses the translated agents filter placeholder', async () => {
-    mockT.mockImplementation(key => {
-      const translations = {
-        'KANBAN.FILTERS.AGENTS': 'Agentes',
-      };
-      return translations[key] || key;
+    expect(findFilterMenu(wrapper).props('modelValue')).toMatchObject({
+      matchMode: 'any',
     });
-    const wrapper = await mountView();
-
-    expect(findAgentFilter(wrapper).props('placeholder')).toBe('Agentes');
-    expect(mockT).toHaveBeenCalledWith('KANBAN.FILTERS.AGENTS');
   });
 
-  it('defines agents filter labels for supported locales', () => {
-    expect(enKanbanMessages.KANBAN.FILTERS.AGENTS).toBe('Agents');
-    expect(ptBRKanbanMessages.KANBAN.FILTERS.AGENTS).toBe('Agentes');
-  });
-
-  it('refetches the board with assignee_ids when the filter changes', async () => {
+  it('refetches with all selected filter categories and match mode', async () => {
     const wrapper = await mountView();
 
     KanbanBoardsAPI.show.mockClear();
-    await findAgentFilter(wrapper).vm.$emit('update:modelValue', [7, 7]);
+    await updateBoardFilters(wrapper, {
+      inboxIds: [2],
+      assigneeIds: [7],
+      cardStatuses: ['open'],
+      priorities: ['high'],
+      dueDates: ['week'],
+      labels: ['vip'],
+      matchMode: 'any',
+    });
     await flushPromises();
 
     expect(KanbanBoardsAPI.show).toHaveBeenCalledWith(10, {
-      params: { assignee_ids: [7] },
+      params: {
+        inbox_ids: [2],
+        assignee_ids: [7],
+        card_statuses: ['open'],
+        priorities: ['high'],
+        due_dates: ['week'],
+        labels: ['vip'],
+        match_mode: 'any',
+      },
     });
+    expect(wrapper.find('[data-testid="kanban-filter-count"]').text()).toBe(
+      '6'
+    );
   });
 
-  it('preserves assignee_ids on load more requests', async () => {
+  it('preserves active filters on load more and realtime refreshes', async () => {
     const wrapper = await mountView(
       buildBoardResponse([buildCard()], {
         stages: [
@@ -2366,7 +2577,10 @@ describe('KanbanView assignee filter', () => {
       })
     );
 
-    await findAgentFilter(wrapper).vm.$emit('update:modelValue', [7]);
+    await updateBoardFilters(wrapper, {
+      priorities: ['high'],
+      matchMode: 'all',
+    });
     await flushPromises();
     KanbanBoardsAPI.getStageCards.mockClear();
 
@@ -2376,17 +2590,11 @@ describe('KanbanView assignee filter', () => {
     expect(KanbanBoardsAPI.getStageCards).toHaveBeenCalledWith(10, 200, {
       limit: 20,
       cursor: { after_id: 502 },
-      assignee_ids: [7],
+      priorities: ['high'],
+      match_mode: 'all',
     });
-  });
 
-  it('preserves assignee_ids on realtime refreshes', async () => {
-    const wrapper = await mountView();
-
-    await findAgentFilter(wrapper).vm.$emit('update:modelValue', [7]);
-    await flushPromises();
     KanbanBoardsAPI.getStageCards.mockClear();
-
     await emitKanbanRealtimeEvent({
       event: 'kanban.card.created',
       data: { board_id: 10, stage_id: 100, card_id: 700 },
@@ -2394,34 +2602,39 @@ describe('KanbanView assignee filter', () => {
 
     expect(KanbanBoardsAPI.getStageCards).toHaveBeenCalledWith(10, 100, {
       limit: 20,
-      assignee_ids: [7],
+      priorities: ['high'],
+      match_mode: 'all',
     });
   });
 
-  it('uses a filtered server refresh for realtime card updates', async () => {
+  it('clears all board filters from the header action', async () => {
     const wrapper = await mountView();
 
-    await findAgentFilter(wrapper).vm.$emit('update:modelValue', [7]);
+    await updateBoardFilters(wrapper, { inboxIds: [2] });
     await flushPromises();
-    KanbanBoardsAPI.showCardById.mockClear();
-    KanbanBoardsAPI.getStageCards.mockClear();
+    KanbanBoardsAPI.show.mockClear();
 
-    await emitKanbanRealtimeEvent({
-      event: 'kanban.card.updated',
-      data: { board_id: 10, stage_id: 100, card_id: 501 },
-    });
+    await wrapper.find('[data-testid="kanban-clear-filters"]').trigger('click');
+    await flushPromises();
 
-    expect(KanbanBoardsAPI.showCardById).not.toHaveBeenCalled();
-    expect(KanbanBoardsAPI.getStageCards).toHaveBeenCalledWith(10, 100, {
-      limit: 20,
-      assignee_ids: [7],
+    expect(findFilterMenu(wrapper).props('modelValue')).toEqual({
+      inboxIds: [],
+      assigneeIds: [],
+      cardStatuses: [],
+      priorities: [],
+      stageSla: [],
+      dueDates: [],
+      createdDates: [],
+      labels: [],
+      matchMode: 'any',
     });
+    expect(KanbanBoardsAPI.show).toHaveBeenCalledWith(10, undefined);
   });
 
-  it('clears the assignee filter when switching boards', async () => {
+  it('resets filters when switching boards', async () => {
     const wrapper = await mountView();
 
-    await findAgentFilter(wrapper).vm.$emit('update:modelValue', [7]);
+    await updateBoardFilters(wrapper, { assigneeIds: [7] });
     await flushPromises();
     KanbanBoardsAPI.show.mockResolvedValueOnce({
       data: buildBoardResponse([], { id: 11, name: 'Renewals Board' }),
@@ -2430,22 +2643,161 @@ describe('KanbanView assignee filter', () => {
     mockRoute.params.boardId = '11';
     await flushPromises();
 
-    expect(findAgentFilter(wrapper).props('modelValue')).toEqual([]);
+    expect(findFilterMenu(wrapper).props('modelValue')).toEqual({
+      inboxIds: [],
+      assigneeIds: [],
+      cardStatuses: [],
+      priorities: [],
+      stageSla: [],
+      dueDates: [],
+      createdDates: [],
+      labels: [],
+      matchMode: 'any',
+    });
     expect(KanbanBoardsAPI.show).toHaveBeenLastCalledWith(11, undefined);
   });
 
-  it('preserves inbox and assignee filters together', async () => {
+  it('toggles Mine quick filter on and off', async () => {
     const wrapper = await mountView();
+    const mineButton = wrapper.find('[data-testid="kanban-filter-mine"]');
 
-    await findInboxFilter(wrapper).vm.$emit('update:modelValue', [2]);
-    await flushPromises();
     KanbanBoardsAPI.show.mockClear();
-
-    await findAgentFilter(wrapper).vm.$emit('update:modelValue', [7]);
+    await mineButton.trigger('click');
     await flushPromises();
 
     expect(KanbanBoardsAPI.show).toHaveBeenCalledWith(10, {
-      params: { inbox_ids: [2], assignee_ids: [7] },
+      params: {
+        assignee_ids: [7],
+        match_mode: 'all',
+      },
     });
+    expect(mineButton.classes()).toContain('text-n-brand');
+    expect(findFilterMenu(wrapper).props('modelValue')).toMatchObject({
+      assigneeIds: [7],
+      matchMode: 'all',
+    });
+
+    KanbanBoardsAPI.show.mockClear();
+    await mineButton.trigger('click');
+    await flushPromises();
+
+    expect(KanbanBoardsAPI.show).toHaveBeenCalledWith(10, undefined);
+    expect(mineButton.classes()).not.toContain('text-n-brand');
+    expect(findFilterMenu(wrapper).props('modelValue')).toMatchObject({
+      assigneeIds: [],
+    });
+  });
+
+  it('toggles Today quick filter on and off with card count badge', async () => {
+    const wrapper = await mountView();
+    const todayButton = wrapper.find('[data-testid="kanban-filter-today"]');
+
+    expect(wrapper.find('[data-testid="kanban-today-count"]').exists()).toBe(
+      false
+    );
+
+    KanbanBoardsAPI.show.mockClear();
+    await todayButton.trigger('click');
+    await flushPromises();
+
+    expect(KanbanBoardsAPI.show).toHaveBeenCalledWith(10, {
+      params: {
+        card_statuses: ['open'],
+        due_dates: ['overdue', 'day'],
+        match_mode: 'all',
+      },
+    });
+    expect(todayButton.classes()).toContain('text-n-brand');
+    expect(wrapper.find('[data-testid="kanban-today-count"]').exists()).toBe(
+      true
+    );
+    expect(wrapper.find('[data-testid="kanban-today-count"]').text()).toBe('1');
+    expect(findFilterMenu(wrapper).props('modelValue')).toMatchObject({
+      dueDates: ['overdue', 'day'],
+      cardStatuses: ['open'],
+      matchMode: 'all',
+    });
+
+    KanbanBoardsAPI.show.mockClear();
+    await todayButton.trigger('click');
+    await flushPromises();
+
+    expect(KanbanBoardsAPI.show).toHaveBeenCalledWith(10, undefined);
+    expect(todayButton.classes()).not.toContain('text-n-brand');
+    expect(wrapper.find('[data-testid="kanban-today-count"]').exists()).toBe(
+      false
+    );
+  });
+
+  it('applies Mine and Today together with match all', async () => {
+    const wrapper = await mountView();
+    const mineButton = wrapper.find('[data-testid="kanban-filter-mine"]');
+    const todayButton = wrapper.find('[data-testid="kanban-filter-today"]');
+
+    await mineButton.trigger('click');
+    await flushPromises();
+
+    KanbanBoardsAPI.show.mockClear();
+    await todayButton.trigger('click');
+    await flushPromises();
+
+    expect(KanbanBoardsAPI.show).toHaveBeenCalledWith(10, {
+      params: {
+        assignee_ids: [7],
+        card_statuses: ['open'],
+        due_dates: ['overdue', 'day'],
+        match_mode: 'all',
+      },
+    });
+    expect(mineButton.classes()).toContain('text-n-brand');
+    expect(todayButton.classes()).toContain('text-n-brand');
+  });
+
+  it('clears Mine and Today when clear all is clicked', async () => {
+    const wrapper = await mountView();
+    const mineButton = wrapper.find('[data-testid="kanban-filter-mine"]');
+    const todayButton = wrapper.find('[data-testid="kanban-filter-today"]');
+
+    await mineButton.trigger('click');
+    await todayButton.trigger('click');
+    await flushPromises();
+
+    expect(mineButton.classes()).toContain('text-n-brand');
+    expect(todayButton.classes()).toContain('text-n-brand');
+
+    KanbanBoardsAPI.show.mockClear();
+    await wrapper.find('[data-testid="kanban-clear-filters"]').trigger('click');
+    await flushPromises();
+
+    expect(mineButton.classes()).not.toContain('text-n-brand');
+    expect(todayButton.classes()).not.toContain('text-n-brand');
+    expect(KanbanBoardsAPI.show).toHaveBeenCalledWith(10, undefined);
+  });
+
+  it('restores quick filter preferences from localStorage on mount', async () => {
+    window.localStorage.setItem(
+      'kanban_board_prefs_1_10_7',
+      JSON.stringify({ mine: true, today: true })
+    );
+
+    KanbanBoardsAPI.show.mockClear();
+    const wrapper = await mountView();
+
+    expect(KanbanBoardsAPI.show).toHaveBeenCalledTimes(1);
+    expect(KanbanBoardsAPI.show).toHaveBeenCalledWith(10, {
+      params: {
+        assignee_ids: [7],
+        card_statuses: ['open'],
+        due_dates: ['overdue', 'day'],
+        match_mode: 'all',
+      },
+    });
+
+    const mineButton = wrapper.find('[data-testid="kanban-filter-mine"]');
+    const todayButton = wrapper.find('[data-testid="kanban-filter-today"]');
+    expect(mineButton.classes()).toContain('text-n-brand');
+    expect(todayButton.classes()).toContain('text-n-brand');
+
+    window.localStorage.removeItem('kanban_board_prefs_1_10_7');
   });
 });

@@ -8,6 +8,13 @@ RSpec.describe KanbanBoard do
       expect(board.auto_create_cards_from_conversations).to be(false)
     end
 
+    it 'disables contact recurrence for new boards' do
+      board = described_class.new
+
+      expect(board.won_recurrence_enabled).to be(false)
+      expect(board.lost_recurrence_enabled).to be(false)
+    end
+
     it 'keeps new boards visible to all agents' do
       board = described_class.new
 
@@ -95,6 +102,26 @@ RSpec.describe KanbanBoard do
       expect(board).not_to be_valid
       expect(board.errors[:inbox_scope_mode]).to be_present
     end
+
+    it 'requires the won recurrence window when recurrence is enabled' do
+      board = build(:kanban_board, won_recurrence_enabled: true)
+
+      expect(board).not_to be_valid
+      expect(board.errors[:won_recurrence_window_minutes]).to be_present
+    end
+
+    it 'requires the lost recurrence window when recurrence is enabled' do
+      board = build(:kanban_board, lost_recurrence_enabled: true)
+
+      expect(board).not_to be_valid
+      expect(board.errors[:lost_recurrence_window_minutes]).to be_present
+    end
+
+    it 'allows recurrence to remain disabled without a window' do
+      board = build(:kanban_board, account: create(:account), won_recurrence_enabled: false, lost_recurrence_enabled: false)
+
+      expect(board).to be_valid
+    end
   end
 
   describe 'associations' do
@@ -107,13 +134,13 @@ RSpec.describe KanbanBoard do
       expect(board.visible_users).to contain_exactly(user)
     end
 
-    it 'exposes allowed inboxes through kanban_board_inboxes' do
+    it 'exposes the inboxes its entry rules name' do
       board = create(:kanban_board)
       inbox = create(:inbox, account: board.account)
-      create(:kanban_board_inbox, account: board.account, kanban_board: board, inbox: inbox)
+      restrict_board_to(board, inbox)
 
-      expect(board.kanban_board_inboxes.count).to eq(1)
-      expect(board.allowed_inboxes).to contain_exactly(inbox)
+      expect(board.kanban_board_entry_rule_inboxes.count).to eq(1)
+      expect(board.derived_allowed_inbox_ids).to contain_exactly(inbox.id)
     end
   end
 
@@ -123,45 +150,43 @@ RSpec.describe KanbanBoard do
     let(:inbox) { create(:inbox, account: account) }
     let(:other_account_inbox) { create(:inbox) }
 
-    it 'accepts any account inbox when in all_inboxes mode' do
-      expect(board).to be_all_inboxes
+    it 'accepts any account inbox when no rule narrows the board' do
+      expect(board).to be_derived_all_inboxes
 
       expect(board.inbox_allowed?(inbox)).to be(true)
     end
 
-    it 'accepts inbox by id in all_inboxes mode' do
+    it 'accepts inbox by id when no rule narrows the board' do
       expect(board.inbox_allowed?(inbox.id)).to be(true)
     end
 
-    it 'rejects inbox from another account in all_inboxes mode' do
+    it 'rejects inbox from another account' do
       expect(board.inbox_allowed?(other_account_inbox)).to be(false)
     end
 
-    it 'accepts a selected inbox in selected_inboxes mode' do
-      board.update!(inbox_scope_mode: 'selected_inboxes')
-      create(:kanban_board_inbox, account: account, kanban_board: board, inbox: inbox)
+    it 'accepts any account inbox when an active rule covers all inboxes' do
+      create(:kanban_board_entry_rule, account: account, kanban_board: board)
 
       expect(board.inbox_allowed?(inbox)).to be(true)
     end
 
-    it 'rejects an unselected inbox in selected_inboxes mode' do
-      board.update!(inbox_scope_mode: 'selected_inboxes')
+    it 'accepts an inbox its active rule names' do
+      restrict_board_to(board, inbox)
 
-      expect(board.inbox_allowed?(inbox)).to be(false)
+      expect(board.inbox_allowed?(inbox)).to be(true)
     end
 
-    it 'rejects all inboxes when selected_inboxes mode has no associations' do
-      board.update!(inbox_scope_mode: 'selected_inboxes')
+    it 'rejects an inbox no active rule names' do
+      restrict_board_to(board)
 
       expect(board.inbox_allowed?(inbox)).to be(false)
       expect(board.inbox_allowed?(other_account_inbox)).to be(false)
     end
 
-    it 'rejects inbox from another account in selected_inboxes mode' do
-      board.update!(inbox_scope_mode: 'selected_inboxes')
-      create(:kanban_board_inbox, account: account, kanban_board: board, inbox: inbox)
+    it 'ignores the inboxes of an inactive rule' do
+      restrict_board_to(board, inbox).update!(active: false)
 
-      expect(board.inbox_allowed?(other_account_inbox)).to be(false)
+      expect(board.inbox_allowed?(inbox)).to be(true)
     end
 
     it 'returns false for nil or blank' do
@@ -171,34 +196,51 @@ RSpec.describe KanbanBoard do
   end
 
   describe 'scope .accepting_inbox' do
-    it 'includes all_inboxes boards' do
+    it 'includes boards with no active entry rule' do
       board = create(:kanban_board)
       inbox = create(:inbox, account: board.account)
 
       expect(described_class.accepting_inbox(inbox.id)).to include(board)
     end
 
-    it 'includes selected_inboxes boards when inbox is associated' do
-      board = create(:kanban_board, inbox_scope_mode: 'selected_inboxes')
+    it 'includes boards whose active rule covers all inboxes' do
+      board = create(:kanban_board)
       inbox = create(:inbox, account: board.account)
-      create(:kanban_board_inbox, account: board.account, kanban_board: board, inbox: inbox)
+      create(:kanban_board_entry_rule, account: board.account, kanban_board: board)
 
       expect(described_class.accepting_inbox(inbox.id)).to include(board)
     end
 
-    it 'excludes selected_inboxes boards when inbox is not associated' do
-      board = create(:kanban_board, inbox_scope_mode: 'selected_inboxes')
+    it 'includes boards whose active rule names the inbox' do
+      board = create(:kanban_board)
       inbox = create(:inbox, account: board.account)
+      restrict_board_to(board, inbox)
+
+      expect(described_class.accepting_inbox(inbox.id)).to include(board)
+    end
+
+    it 'excludes boards whose active rule does not name the inbox' do
+      board = create(:kanban_board)
+      inbox = create(:inbox, account: board.account)
+      restrict_board_to(board, create(:inbox, account: board.account))
 
       expect(described_class.accepting_inbox(inbox.id)).not_to include(board)
     end
 
-    it 'excludes selected_inboxes boards when inbox belongs to another account' do
-      board = create(:kanban_board, inbox_scope_mode: 'selected_inboxes')
-      other_account = create(:account)
-      inbox = create(:inbox, account: other_account)
+    it 'excludes boards when the inbox belongs to another account' do
+      board = create(:kanban_board)
+      restrict_board_to(board, create(:inbox, account: board.account))
+      inbox = create(:inbox, account: create(:account))
 
       expect(described_class.accepting_inbox(inbox.id)).not_to include(board)
     end
+  end
+
+  def restrict_board_to(board, *inboxes)
+    rule = create(:kanban_board_entry_rule, :selected_inboxes, account: board.account, kanban_board: board)
+    inboxes.each do |inbox|
+      create(:kanban_board_entry_rule_inbox, account: board.account, kanban_board_entry_rule: rule, inbox: inbox)
+    end
+    rule
   end
 end

@@ -18,6 +18,70 @@
 #available at https://guides.rubyonrails.org/i18n.html.
 pt_BR:
   hello: 'Olá, mundo'
+  kanban:
+    board_templates:
+      blank:
+        name: 'Em branco'
+        description: 'Só o essencial: uma etapa mais Ganho e Perdido.'
+        stages:
+          entry: 'Entrada'
+          won: 'Ganho'
+          lost: 'Perdido'
+      sales:
+        name: 'Vendas'
+        description: 'Do primeiro contato ao fechamento da venda.'
+        stages:
+          new_contact: 'Novo contato'
+          qualification: 'Qualificação'
+          quote_sent: 'Orçamento enviado'
+          negotiation: 'Negociação'
+          won: 'Ganho'
+          lost: 'Perdido'
+        lost_reasons:
+          price: 'Preço'
+          delivery_time: 'Prazo de entrega'
+          out_of_stock: 'Sem estoque'
+          bought_elsewhere: 'Comprou em outro lugar'
+          no_reply: 'Sem resposta'
+      tech_support:
+        name: 'Assistência técnica'
+        description: 'Da entrada do equipamento até a devolução.'
+        stages:
+          received: 'Recebido'
+          diagnosis: 'Diagnóstico'
+          awaiting_approval: 'Aguardando aprovação'
+          in_repair: 'Em reparo'
+          ready_for_pickup: 'Pronto para retirada'
+          delivered: 'Entregue'
+          cancelled: 'Cancelado'
+        lost_reasons:
+          quote_refused: 'Orçamento recusado'
+          unrepairable: 'Sem reparo possível'
+          gave_up: 'Cliente desistiu'
+          abandoned: 'Equipamento abandonado'
+        custom_fields:
+          service_order: 'Nº da OS'
+          equipment: 'Equipamento'
+          device_password: 'Senha do aparelho'
+          promised_date: 'Prazo prometido'
+      quotes:
+        name: 'Orçamentos e projetos'
+        description: 'Para vendas maiores, cliente PJ e montagem sob medida.'
+        stages:
+          request: 'Solicitação'
+          assessment: 'Levantamento'
+          proposal_sent: 'Proposta enviada'
+          follow_up: 'Acompanhamento'
+          closed: 'Fechado'
+          refused: 'Recusado'
+        lost_reasons:
+          price: 'Preço'
+          scope_changed: 'Escopo mudou'
+          postponed: 'Adiado'
+          competitor: 'Concorrente'
+        custom_fields:
+          company: 'Empresa'
+          valid_until: 'Prazo de validade'
   inbox:
     reauthorization:
       success: 'Canal reautenticado com sucesso'
@@ -38,11 +102,19 @@ pt_BR:
       reporting_timezone:
         invalid: não é um fuso horário válido
       support_email:
-        invalid: is not a valid email address
+        invalid: não é um endereço de e-mail válido
     validations:
       presence: não pode ficar em branco
     webhook:
       invalid: Eventos inválidos
+    kanban_card_field_value:
+      value:
+        invalid_for_field_type: 'é inválido para "%{field_key}" (esperava um valor %{field_type} válido)'
+        multiple_not_allowed: 'para "%{field_key}" não aceita vários valores'
+    kanban_card_note:
+      attachments:
+        too_many: 'Até 5 arquivos por nota.'
+        too_large: 'Cada arquivo deve ter no máximo 20 MB.'
     signup:
       disposable_email: Não permitimos e-mails descartáveis
       blocked_domain: Este domínio não é permitido. Se você acredita que isso é um erro, por favor contate o suporte.
@@ -50,6 +122,11 @@ pt_BR:
       email_already_exists: 'Você já se cadastrou para uma conta com %{email}'
       invalid_params: 'Inválido, por favor, verifique os parâmetros de inscrição e tente novamente'
       failed: Registro falhou
+    conversation_assistant:
+      not_ready: 'A resposta do assistente ainda não está pronta'
+      suggested_reply_blank: 'A resposta sugerida está vazia'
+      outside_messaging_window: 'Não é possível enviar esta resposta porque a janela de mensagens com o cliente expirou'
+      send_failed: 'Não foi possível enviar a mensagem ao cliente'
     voice:
       call_already_accepted: '%{agent_name} já está atendendo a chamada.'
     assignment_policy:
@@ -67,6 +144,9 @@ pt_BR:
     saml:
       feature_not_enabled: SAML não está habilitado para esta conta
       sso_not_enabled: O SSO via SAML não está habilitado para esta instalação
+    conversations:
+      unread_counts:
+        feature_not_enabled: A contagem de conversas não lidas não está habilitada para esta conta
     data_import:
       data_type:
         invalid: Tipo de dado inválido
@@ -85,6 +165,10 @@ pt_BR:
       search:
         query_missing: Especifique a string de busca com o parâmetro q
     messages:
+      waha_connection_conflict: 'Este servidor e sessão WAHA são usados por várias caixas de entrada existentes. Atualize uma delas antes de usar esta conexão.'
+      waha_connection_in_use: 'Este servidor e sessão WAHA já estão conectados a outra caixa de entrada.'
+      waha_url_invalid: 'deve ser uma URL HTTP(S) válida de servidor WAHA, sem credenciais ou parâmetros de consulta'
+      waha_webhook_session_mismatch: 'A sessão do webhook não corresponde a esta caixa de entrada WAHA.'
       search:
         time_range_limit_exceeded: 'A pesquisa está limitada aos últimos %{days} dias'
     categories:
@@ -110,7 +194,7 @@ pt_BR:
         contact_phone_required: 'Número de telefone do contato é obrigatório'
         permission_request_failed: 'Falha ao enviar solicitação de permissão de chamada'
     openai:
-      invalid_api_key: 'OpenAI API key is invalid or revoked. Please check your key in your OpenAI dashboard.'
+      invalid_api_key: 'A chave de API da OpenAI é inválida ou foi revogada. Verifique-a no painel da OpenAI.'
     inboxes:
       imap:
         socket_error: Por favor, verifique a conexão de rede, endereço IMAP e tente novamente.
@@ -164,36 +248,36 @@ pt_BR:
       agent_name: Nome do Agente
       conversations_count: Conversas atribuídas
       avg_first_response_time: Tempo médio de primeira resposta
-      avg_resolution_time: Tempo médio de resolução
-      resolution_count: Contagem de Resolução
+      avg_resolution_time: Tempo médio de finalização
+      resolution_count: Contagem de Finalização
       avg_customer_waiting_time: Tempo médio de espera do cliente
     inbox_csv:
       inbox_name: Nome da Caixa de Entrada
       inbox_type: Tipo da Caixa de Entrada
       conversations_count: Nº de Conversas
       avg_first_response_time: Tempo médio de primeira resposta
-      avg_resolution_time: Tempo médio de resolução
+      avg_resolution_time: Tempo médio de finalização
     label_csv:
       label_title: Etiqueta
       conversations_count: Nº de Conversas
       avg_first_response_time: Tempo médio de primeira resposta
-      avg_resolution_time: Tempo médio de resolução
+      avg_resolution_time: Tempo médio de finalização
       avg_reply_time: Tempo médio de resposta
-      resolution_count: Contagem de Resolução
+      resolution_count: Contagem de Finalização
     team_csv:
       team_name: Nome do Time
       conversations_count: Contagem de conversas
       avg_first_response_time: Tempo médio de primeira resposta
-      avg_resolution_time: Tempo médio de resolução
-      resolution_count: Contagem de Resolução
+      avg_resolution_time: Tempo médio de finalização
+      resolution_count: Contagem de Finalização
       avg_customer_waiting_time: Tempo médio de espera do cliente
     conversation_csv:
       conversations_count: Conversas
       incoming_messages_count: Mensagens Recebidas
       outgoing_messages_count: Mensagens enviadas
       avg_first_response_time: Tempo médio de primeira resposta
-      avg_resolution_time: Tempo médio de resolução
-      resolution_count: Quantidade de resoluções
+      avg_resolution_time: Tempo médio de finalização
+      resolution_count: Quantidade de finalizações
       avg_customer_waiting_time: Tempo médio de espera do cliente
     conversation_traffic_csv:
       timezone: Fuso horário
@@ -227,7 +311,7 @@ pt_BR:
       contact_message: '%{contact_name} - %{inbox_name}'
       sla_missed_first_response: 'Meta de SLA de Primeira Resposta não alcançada para a conversa (#%{display_id})'
       sla_missed_next_response: 'Meta de SLA de Próxima Resposta não alcançada para a conversa (#%{display_id})'
-      sla_missed_resolution: 'Meta de SLA de Resolução não alcançada para a conversa (#%{display_id})'
+      sla_missed_resolution: 'Meta de SLA de Finalização não alcançada para a conversa (#%{display_id})'
     attachment: 'Anexo'
     attachment_message: 'Enviou um anexo'
     audio_message: 'Mensagem de áudio'
@@ -243,6 +327,75 @@ pt_BR:
       deleted: Esta mensagem foi excluída
       waha_edit_not_allowed: Esta mensagem não pode mais ser editada
       waha_react_not_allowed: Não é possível reagir a esta mensagem
+      waha_media_pending: 'Baixando a mídia'
+      waha_media_unavailable: 'Mídia indisponível: o download falhou após várias tentativas'
+      waha_call:
+        # Só existem chamadas recebidas, então o estado (%{result}) carrega a
+        # frase e %{direction} fica disponível sem poluir o texto.
+        event: 'Chamada de %{kind} %{result} no WhatsApp%{duration}'
+        direction:
+          incoming: 'recebida'
+        kind:
+          voice: 'voz'
+          video: 'vídeo'
+        result:
+          received: 'recebida'
+          accepted: 'atendida'
+          rejected: 'encerrada'
+        duration: ' (%{duration}s)'
+      waha_location:
+        live: '📡 Localização em tempo real'
+      waha_contacts:
+        header:
+          one: '👤 Contato compartilhado'
+          other: '👤 Contatos compartilhados'
+        name: '🪪 %{name}'
+        phone: '📞 %{phone}'
+        unnamed: 'Contato sem nome'
+      waha_poll:
+        header: '📊 Enquete'
+        selectable_options:
+          one: 'Selecione uma opção'
+          other: 'Selecione até %{count} opções'
+        option: '• %{option}'
+        observed_votes: 'Votos observados'
+        observed_vote:
+          one: '• %{option} — 1 voto'
+          other: '• %{option} — %{count} votos'
+      waha_list:
+        header: '📋 Lista'
+        response: 'Item selecionado'
+        section: '%{title}'
+        option: '• %{title}%{description}'
+        selected: 'Selecionado: %{option}'
+      waha_event:
+        header: '📅 Evento'
+        canceled: 'Cancelado'
+        starts_at: 'Início: %{time}'
+        ends_at: 'Término: %{time}'
+        location: 'Local: %{location}'
+      waha_pix:
+        header: '💰 Cobrança Pix'
+        merchant: 'Recebedor: %{name}'
+        key: 'Chave Pix: %{key}'
+        key_with_type: 'Chave Pix: %{key} (%{key_type})'
+        amount: 'Valor: %{amount}'
+        reference: 'Identificador: %{reference}'
+      waha_facebook_ad:
+        header: '📣 Anúncio do Facebook/Instagram'
+        media: 'Mídia: %{url}'
+        source: 'Origem: %{url}'
+      waha_album:
+        header: '🖼️ Álbum'
+        photos:
+          one: '%{count} foto'
+          other: '%{count} fotos'
+        videos:
+          one: '%{count} vídeo'
+          other: '%{count} vídeos'
+      waha_status_reply:
+        quoted_author: '%{author} · Status'
+        quoted_author_unknown: 'Status'
       whatsapp:
         list_button_label: 'Escolha um item'
         call_permission_request_body: 'Gostaríamos de ligar para você em relação à sua conversa.'
@@ -253,23 +406,23 @@ pt_BR:
         error_code: 'Código de erro: %{error_code}'
     activity:
       captain:
-        resolved: 'A conversa foi marcada como resolvida por %{user_name} por inatividade'
-        resolved_with_reason: 'A conversa foi marcada como resolvida por %{user_name} (%{reason})'
-        resolved_by_tool: 'A conversa foi marcada como resolvida por %{user_name}: %{reason}'
+        resolved: 'A conversa foi marcada como finalizada por %{user_name} por inatividade'
+        resolved_with_reason: 'A conversa foi marcada como finalizada por %{user_name} (%{reason})'
+        resolved_by_tool: 'A conversa foi marcada como finalizada por %{user_name}: %{reason}'
         open: 'A conversa foi aberta por %{user_name}'
         open_with_reason: 'A conversa foi marcada como aberta por %{user_name} (%{reason})'
         auto_opened_after_agent_reply: 'A conversa foi marcada como aberta automaticamente após a resposta de um agente'
       agent_bot:
         error_moved_to_open: 'A conversa foi marcada como aberta pelo sistema devido a um erro com o robô de atendimento.'
       status:
-        resolved: 'Conversa foi marcada como resolvida por %{user_name}'
-        contact_resolved: 'A conversa foi resolvida por %{contact_name}'
+        resolved: 'Conversa foi marcada como finalizada por %{user_name}'
+        contact_resolved: 'A conversa foi finalizada por %{contact_name}'
         open: 'Conversa foi reaberta por %{user_name}'
         pending: 'Conversa foi marcada como pendente por %{user_name}'
         snoozed: 'Conversa foi adiada por %{user_name}'
-        auto_resolved_days: 'A conversa foi marcada como resolvida pelo sistema por ter %{count} dias de inatividade'
-        auto_resolved_hours: 'A conversa foi marcada como resolvida pelo sistema por ter %{count} horas de inatividade'
-        auto_resolved_minutes: 'A conversa foi marcada como resolvida pelo sistema por ter %{count} minutos de inatividade'
+        auto_resolved_days: 'A conversa foi marcada como finalizada pelo sistema por ter %{count} dias de inatividade'
+        auto_resolved_hours: 'A conversa foi marcada como finalizada pelo sistema por ter %{count} horas de inatividade'
+        auto_resolved_minutes: 'A conversa foi marcada como finalizada pelo sistema por ter %{count} minutos de inatividade'
         system_auto_open: O sistema reabriu a conversa devido a uma nova mensagem recebida.
       priority:
         added: '%{user_name} definiu a prioridade para %{new_priority}'
@@ -307,10 +460,10 @@ pt_BR:
       csat:
         not_sent_due_to_messaging_window: 'Pesquisa CSAT não foi enviada devido a restrições de envio de mensagens'
       auto_resolve:
-        not_sent_due_to_messaging_window: 'Auto-resolver mensagem não enviada devido a restrições de envio de mensagens'
+        not_sent_due_to_messaging_window: 'Mensagem de finalização automática não enviada devido a restrições de envio de mensagens'
       muted: '%{user_name} silenciou a conversa'
       unmuted: '%{user_name} reativou a conversa'
-      auto_resolution_message: 'Resolvendo a conversa dado que está inativa por um tempo. Por favor, inicie uma nova conversa se precisar de mais ajuda.'
+      auto_resolution_message: 'Finalizando a conversa, pois ela está inativa há algum tempo. Por favor, inicie uma nova conversa se precisar de mais ajuda.'
     templates:
       greeting_message_body: '%{account_name} normalmente responde em algumas horas.'
       ways_to_reach_you_message_body: 'Informe à equipe uma forma de contatá-lo.'
@@ -468,6 +621,7 @@ pt_BR:
       go_to_homepage: Site
       visit_website: Visite o site
       appearance:
+        title: Aparência
         system: Sistema
         light: Claro
         dark: Escuro

@@ -31,6 +31,9 @@
   - active_storage_analysis
   - active_storage_purge
   - action_mailbox_incineration
+  # Bulk WAHA history import. Production runs it on a dedicated Sidekiq process
+  # (`-q waha_import`) so a long import never holds the main process's threads.
+  - waha_import
 
 # you can override concurrency based on environment
 production:

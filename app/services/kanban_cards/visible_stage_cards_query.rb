@@ -1,54 +1,60 @@
 class KanbanCards::VisibleStageCardsQuery
-  Result = Struct.new(:cards, :has_more, :next_cursor, :total_count, keyword_init: true)
+  Result = Struct.new(:cards, :card_ids, :has_more, :next_cursor, :total_count, :total_value, :stale_count, keyword_init: true)
   RefreshRequiredError = Class.new(StandardError)
 
   DEFAULT_LIMIT = 20
   MAX_LIMIT = 50
+  TERMINAL_PERIODS = { '7d' => 7, '30d' => 30, '90d' => 90 }.freeze
+  ALL_TIME_TERMINAL_PERIOD = 'all'.freeze
+  TERMINAL_PERIOD_VALUES = (TERMINAL_PERIODS.keys + [ALL_TIME_TERMINAL_PERIOD]).freeze
+  DEFAULT_TERMINAL_PERIOD = '30d'.freeze
+  STAGE_SLA_VALUES = %w[stale].freeze
 
   # rubocop:disable Metrics/ParameterLists
-  def initialize(account:, user:, kanban_board:, kanban_stage:, limit: DEFAULT_LIMIT, cursor: nil, visible_inbox_ids: nil,
-                 visible_team_ids: nil, account_user: nil, filtered_inbox_ids: nil, filtered_assignee_ids: nil)
+  def initialize(account:, kanban_board:, kanban_stage:, visible_cards:, limit: DEFAULT_LIMIT, cursor: nil,
+                 terminal_period: DEFAULT_TERMINAL_PERIOD, filtered_stage_sla: nil)
     @account = account
-    @user = user
     @kanban_board = kanban_board
     @kanban_stage = kanban_stage
+    @board_visible_cards = visible_cards
     @limit = limit
     @cursor = cursor
-    @visible_inbox_ids = visible_inbox_ids
-    @visible_team_ids = visible_team_ids
-    @account_user = account_user
-    @filtered_inbox_ids =
-      filtered_inbox_ids.nil? ? nil : Array(filtered_inbox_ids).uniq
-    @filtered_assignee_ids =
-      filtered_assignee_ids.nil? ? nil : Array(filtered_assignee_ids).uniq
+    @terminal_period = terminal_period.presence || DEFAULT_TERMINAL_PERIOD
+    @filtered_stage_sla = filtered_stage_sla
   end
   # rubocop:enable Metrics/ParameterLists
 
-  def call
+  def call(load_cards: true, hydrate_cards: true)
     return empty_result unless valid_board_and_stage?
+
+    return metadata_result unless load_cards
 
     anchor = cursor_after_id.present? ? cursor_anchor! : nil
     ids = paginated_card_ids(anchor)
     page_ids = ids.first(effective_limit)
-    cards = payload_cards(page_ids)
+    cards = hydrate_cards ? self.class.load_payload_cards(page_ids) : []
 
     Result.new(
       cards: cards,
+      card_ids: page_ids,
       has_more: ids.length > effective_limit,
       next_cursor: next_cursor_for(page_ids, ids),
       # Counting on every cursor-paginated page would re-scan the whole
       # stage on each load-more click; only the first page needs it.
-      total_count: anchor.nil? ? visible_cards.count : nil
+      **(anchor.nil? ? totals_fields : {})
     )
+  end
+
+  def self.load_payload_cards(ids)
+    KanbanCards::CompactCardsQuery.call(ids)
   end
 
   private
 
-  attr_reader :account, :user, :kanban_board, :kanban_stage, :limit, :cursor,
-              :filtered_inbox_ids, :filtered_assignee_ids
+  attr_reader :account, :kanban_board, :kanban_stage, :limit, :cursor, :terminal_period, :filtered_stage_sla
 
   def empty_result
-    Result.new(cards: [], has_more: false, next_cursor: nil, total_count: 0)
+    Result.new(cards: [], card_ids: [], has_more: false, next_cursor: nil, total_count: 0, total_value: '0.0', stale_count: 0)
   end
 
   def valid_board_and_stage?
@@ -60,13 +66,59 @@ class KanbanCards::VisibleStageCardsQuery
   end
 
   def visible_cards
-    @visible_cards ||= KanbanCard
-                       .active
-                       .left_outer_joins(:conversation)
-                       .where(account_id: account.id, kanban_board_id: kanban_board.id, kanban_stage_id: kanban_stage.id)
-                       .where(visibility_condition)
-                       .then { |scope| filtered_inbox_ids.nil? ? scope : scope.where(inbox_id: filtered_inbox_ids) }
-                       .then { |scope| filtered_assignee_ids.nil? ? scope : scope.where(conversations: { assignee_id: filtered_assignee_ids }) }
+    @visible_cards ||= begin
+      scope = @board_visible_cards.where(kanban_stage_id: kanban_stage.id)
+      # The period is a column slice, not a user filter, so it stays outside match_mode.
+      scope = scope.where(terminal_period_condition) if terminal_period_condition
+      scope = scope.where(stage_sla_condition) if stage_sla_condition
+      scope
+    end
+  end
+
+  def terminal_period_condition
+    return unless terminal_stage?
+
+    days = TERMINAL_PERIODS[terminal_period]
+    return if days.blank? # 'all' keeps the whole history
+
+    card_table[:stage_entered_at].gteq(days.days.ago)
+  end
+
+  def terminal_stage?
+    KanbanStage.special_stage_ids(kanban_board).include?(kanban_stage.id)
+  end
+
+  # Cards past the stage time limit. A terminal stage or one without a limit has
+  # none, and a predicate no row can satisfy reports that as a zero metric instead
+  # of needing a branch at each call site.
+  def stale_cards_condition
+    return card_table[:id].eq(nil) if terminal_stage? || kanban_stage.sla_hours.blank?
+
+    card_table[:stage_entered_at].lt(kanban_stage.sla_hours.hours.ago)
+  end
+
+  def stage_sla_condition
+    return unless filtered_stage_sla&.include?('stale')
+
+    stale_cards_condition
+  end
+
+  # The stale slice rides along on the totals scan, so the stage header reports
+  # every stale card rather than only the ones the first page happened to load.
+  def visible_totals
+    @visible_totals ||= KanbanCards::Totals.metrics(visible_cards, all: nil, stale: stale_cards_condition)
+  end
+
+  def totals_fields
+    {
+      total_count: visible_totals.fetch(:all).count,
+      total_value: KanbanCards::Totals.decimal_string(visible_totals.fetch(:all).value),
+      stale_count: visible_totals.fetch(:stale).count
+    }
+  end
+
+  def metadata_result
+    Result.new(cards: [], card_ids: [], has_more: false, next_cursor: nil, **totals_fields)
   end
 
   def paginated_card_ids(anchor)
@@ -74,20 +126,6 @@ class KanbanCards::VisibleStageCardsQuery
     scope = scope.where(after_anchor_condition(anchor)) if anchor.present?
 
     scope.limit(effective_limit + 1).ids
-  end
-
-  def payload_cards(ids)
-    return [] if ids.blank?
-
-    cards_by_id = KanbanCard
-                  .where(id: ids)
-                  .includes(
-                    conversation: { assignee: { avatar_attachment: :blob } },
-                    contact: { avatar_attachment: :blob },
-                    inbox: [:channel, { avatar_attachment: :blob }]
-                  ).index_by(&:id)
-
-    ids.filter_map { |id| cards_by_id[id] }
   end
 
   def cursor_anchor!
@@ -133,78 +171,7 @@ class KanbanCards::VisibleStageCardsQuery
     cursor[:after_id] || cursor['after_id']
   end
 
-  def visibility_condition
-    return manual_card_condition.or(valid_conversation_card_condition) if administrator?
-    return valid_conversation_card_condition if user.is_a?(AgentBot)
-
-    agent_visibility_condition
-  end
-
-  def agent_visibility_condition
-    conditions = []
-    conditions << accessible_manual_card_condition if visible_inbox_ids.present?
-    conditions << accessible_conversation_card_condition if conversation_access_condition
-
-    or_condition(conditions) || card_table[:id].eq(nil)
-  end
-
-  def accessible_manual_card_condition
-    manual_card_condition.and(card_table[:inbox_id].in(visible_inbox_ids))
-  end
-
-  def accessible_conversation_card_condition
-    valid_conversation_card_condition.and(conversation_access_condition)
-  end
-
-  def conversation_access_condition
-    @conversation_access_condition ||= or_condition(conversation_access_conditions)
-  end
-
-  def conversation_access_conditions
-    conditions = []
-    conditions << conversation_table[:inbox_id].in(visible_inbox_ids) if visible_inbox_ids.present?
-    conditions << conversation_table[:team_id].in(visible_team_ids) if visible_team_ids.present?
-    conditions
-  end
-
-  def valid_conversation_card_condition
-    condition = card_table[:conversation_id].not_eq(nil)
-    condition = condition.and(conversation_table[:account_id].eq(account.id))
-    condition = condition.and(conversation_table[:contact_id].eq(card_table[:contact_id]))
-    condition.and(conversation_table[:inbox_id].eq(card_table[:inbox_id]))
-  end
-
-  def manual_card_condition
-    card_table[:conversation_id].eq(nil)
-  end
-
-  def or_condition(conditions)
-    conditions.reduce { |condition, next_condition| condition.or(next_condition) }
-  end
-
-  def visible_inbox_ids
-    @visible_inbox_ids ||= user.inboxes.where(account_id: account.id).pluck(:id)
-  end
-
-  def visible_team_ids
-    @visible_team_ids ||= user.teams.where(account_id: account.id).pluck(:id)
-  end
-
-  def administrator?
-    account_user&.administrator?
-  end
-
-  def account_user
-    return unless user.respond_to?(:account_users)
-
-    @account_user ||= user.account_users.find_by(account: account)
-  end
-
   def card_table
     KanbanCard.arel_table
-  end
-
-  def conversation_table
-    Conversation.arel_table
   end
 end

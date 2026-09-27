@@ -1,6 +1,7 @@
 json.partial! 'api/v1/accounts/kanban_boards/kanban_board', formats: [:json], kanban_board: @kanban_board
-json.inbox_scope_mode @kanban_board.inbox_scope_mode
-json.allowed_inbox_ids @kanban_board.kanban_board_inboxes.order(:inbox_id).pluck(:inbox_id)
+inbox_scope = @kanban_board.derived_inbox_scope
+json.inbox_scope_mode inbox_scope.fetch(:mode)
+json.allowed_inbox_ids inbox_scope.fetch(:inbox_ids)
 json.assignable_users @kanban_board.assignable_users.order(:name) do |user|
   json.id user.id
   json.name user.name
@@ -23,10 +24,12 @@ json.stages do
     end
 
     json.pagination do
-      json.limit @stage_card_limit
-      json.has_more stage_card_result.has_more
-      json.next_cursor stage_card_result.next_cursor
-      json.total_count stage_card_result.total_count
+      json.partial!(
+        'api/v1/accounts/kanban_boards/stage_pagination',
+        formats: [:json],
+        result: stage_card_result,
+        limit: @stage_card_limit
+      )
     end
   end
 end

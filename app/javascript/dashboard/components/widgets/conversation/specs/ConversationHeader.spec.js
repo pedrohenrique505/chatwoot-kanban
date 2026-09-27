@@ -1,8 +1,9 @@
-import { shallowMount } from '@vue/test-utils';
+import { flushPromises, shallowMount } from '@vue/test-utils';
 import { createStore } from 'vuex';
 import { ref } from 'vue';
 
 import ConversationHeader from '../ConversationHeader.vue';
+import { EMBEDDED_CONVERSATION } from 'dashboard/composables/useEmbeddedConversation';
 
 vi.mock('vue-router', async importOriginal => {
   const actual = await importOriginal();
@@ -33,10 +34,16 @@ describe('ConversationHeader', () => {
   let callButtonClick;
   let resolveButtonClick;
   let menuButtonClick;
+  let assignAgent;
+  let assignTeam;
+  let setCurrentChatAssignee;
+  let setCurrentChatTeam;
 
   const createWrapper = ({
     isContactSidebarOpen = false,
     isCopilotPanelOpen = true,
+    embeddedContext = null,
+    showBackButton = false,
   } = {}) => {
     uiSettings = {
       is_contact_sidebar_open: isContactSidebarOpen,
@@ -48,6 +55,10 @@ describe('ConversationHeader', () => {
     callButtonClick = vi.fn();
     resolveButtonClick = vi.fn();
     menuButtonClick = vi.fn();
+    assignAgent = vi.fn();
+    assignTeam = vi.fn();
+    setCurrentChatAssignee = vi.fn();
+    setCurrentChatTeam = vi.fn();
 
     store = createStore({
       state: {
@@ -57,9 +68,14 @@ describe('ConversationHeader', () => {
         getSelectedChat: () => chat,
         getCurrentAccountId: () => 1,
         getUISettings: state => state.uiSettings,
+        getCurrentUser: () => ({ id: 1 }),
       },
       actions: {
         updateUISettings,
+        assignAgent,
+        assignTeam,
+        setCurrentChatAssignee,
+        setCurrentChatTeam,
       },
       modules: {
         contacts: {
@@ -76,15 +92,31 @@ describe('ConversationHeader', () => {
             getInboxById: () => () => inbox,
           },
         },
+        inboxAssignableAgents: {
+          namespaced: true,
+          getters: {
+            getAssignableAgents: () => () => [],
+          },
+        },
+        teams: {
+          namespaced: true,
+          getters: {
+            getTeams: () => [],
+          },
+        },
       },
     });
 
     wrapper = shallowMount(ConversationHeader, {
       props: {
         chat,
+        showBackButton,
       },
       global: {
         plugins: [store],
+        provide: embeddedContext
+          ? { [EMBEDDED_CONVERSATION]: ref(embeddedContext) }
+          : {},
         stubs: {
           BackButton: {
             name: 'BackButton',
@@ -126,8 +158,23 @@ describe('ConversationHeader', () => {
           },
           NextButton: {
             name: 'NextButton',
-            template:
-              '<button data-testid="conversation-header-search-button" />',
+            template: '<button v-bind="$attrs" />',
+          },
+          MultiselectDropdown: {
+            name: 'MultiselectDropdown',
+            props: {
+              compact: Boolean,
+              compactIcon: String,
+              options: Array,
+              selectedItem: Object,
+            },
+            emits: ['select'],
+            template: '<button data-testid="assignment-selector" />',
+          },
+          ConversationLabels: {
+            name: 'ConversationLabels',
+            props: { compact: Boolean },
+            template: '<button data-testid="conversation-labels-button" />',
           },
           SLACardLabel: {
             name: 'SLACardLabel',
@@ -310,6 +357,86 @@ describe('ConversationHeader', () => {
     expect(searchButton.attributes('aria-label')).toBe(
       'Search in conversation'
     );
+  });
+
+  it('renders direct assignment controls after the search action', () => {
+    chat.meta.assignee = { id: 7, name: 'Ada Lovelace' };
+    chat.meta.team = { id: 3, name: 'Support' };
+    createWrapper();
+
+    const [agentSelector, teamSelector] = wrapper.findAllComponents({
+      name: 'MultiselectDropdown',
+    });
+
+    expect(agentSelector.props()).toMatchObject({
+      compact: true,
+      compactIcon: 'i-lucide-user-round-check',
+      selectedItem: chat.meta.assignee,
+    });
+    expect(teamSelector.props()).toMatchObject({
+      compact: true,
+      compactIcon: 'i-lucide-users-round',
+      selectedItem: chat.meta.team,
+    });
+    expect(
+      wrapper.getComponent({ name: 'ConversationLabels' }).props('compact')
+    ).toBe(true);
+  });
+
+  it('updates the assigned agent through the existing conversation actions', async () => {
+    createWrapper();
+    const agent = { id: 7, name: 'Ada Lovelace' };
+    const [agentSelector] = wrapper.findAllComponents({
+      name: 'MultiselectDropdown',
+    });
+
+    agentSelector.vm.$emit('select', agent);
+    await flushPromises();
+
+    expect(setCurrentChatAssignee).toHaveBeenCalledWith(expect.any(Object), {
+      conversationId: chat.id,
+      assignee: agent,
+    });
+    expect(assignAgent).toHaveBeenCalledWith(expect.any(Object), {
+      conversationId: chat.id,
+      agentId: agent.id,
+    });
+  });
+
+  it('updates the assigned team through the existing conversation actions', async () => {
+    createWrapper();
+    const team = { id: 3, name: 'Support' };
+    const [, teamSelector] = wrapper.findAllComponents({
+      name: 'MultiselectDropdown',
+    });
+
+    teamSelector.vm.$emit('select', team);
+    await flushPromises();
+
+    expect(setCurrentChatTeam).toHaveBeenCalledWith(expect.any(Object), {
+      conversationId: chat.id,
+      team,
+    });
+    expect(assignTeam).toHaveBeenCalledWith(expect.any(Object), {
+      conversationId: chat.id,
+      teamId: team.id,
+    });
+  });
+
+  it('replaces the route back button with the embedded one', () => {
+    createWrapper({
+      showBackButton: true,
+      embeddedContext: {
+        sidebarOpen: true,
+        setSidebarOpen: vi.fn(),
+        goBack: vi.fn(),
+      },
+    });
+
+    expect(wrapper.findComponent({ name: 'EmbeddedBackButton' }).exists()).toBe(
+      true
+    );
+    expect(wrapper.findComponent({ name: 'BackButton' }).exists()).toBe(false);
   });
 
   it('emits search action without toggling contact details', async () => {

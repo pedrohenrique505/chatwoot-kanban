@@ -1,19 +1,20 @@
 class Waha::ReactionApplier
-  QUOTE_LIMIT = 60
-
   # Applies a message.reaction payload to the target message (the current member
   # of its edit family): stores the reaction under content_attributes['reactions']
   # keyed by reactor — WhatsApp allows one reaction per person, so a new reaction
-  # replaces the previous one naturally — and posts an activity on add/change.
-  # Removals (empty text) are silent: the chip disappears, no activity.
+  # replaces the previous one naturally. Removals (empty text) are silent: the
+  # chip disappears without creating another conversation message.
   pattr_initialize [:channel!, :target_message!, :payload!]
 
   def perform
-    # WhatsApp discards reactions along with a revoked message; nothing to show.
-    return if target_message.content_attributes['deleted']
+    target_message.with_lock do
+      # Reload under the row lock before reading the per-participant map.
+      next if target_message.content_attributes['deleted']
 
-    emoji = payload.dig('reaction', 'text').to_s
-    emoji.empty? ? remove_reaction : apply_reaction(emoji)
+      @reactions = nil
+      emoji = payload.dig('reaction', 'text').to_s
+      emoji.empty? ? remove_reaction : apply_reaction(emoji)
+    end
   end
 
   private
@@ -33,8 +34,7 @@ class Waha::ReactionApplier
   end
 
   def apply_reaction(emoji)
-    # Idempotent under webhook redelivery: same reactor + same emoji is a no-op
-    # (no duplicate activity).
+    # Idempotent under webhook redelivery: same reactor + same emoji is a no-op.
     return if reactions.dig(reactor_key, 'emoji') == emoji
 
     entry = { 'emoji' => emoji, 'agent_id' => pending_agent&.id, 'name' => reactor_name, 'timestamp' => payload['timestamp'] }
@@ -42,7 +42,6 @@ class Waha::ReactionApplier
     ActiveRecord::Base.transaction do
       update_target_reactions
       clear_pending_agent
-      create_activity(emoji, entry['name'])
     end
   end
 
@@ -78,11 +77,6 @@ class Waha::ReactionApplier
     contact_inbox&.contact&.name || formatted_number(reactor_key)
   end
 
-  def formatted_number(jid)
-    digits = jid.to_s.split('@').first.to_s.split(':').first
-    digits.present? ? "+#{digits}" : jid.to_s
-  end
-
   # The agent who reacted from Chatwoot, resolved from the marker ReactionService
   # stashed on the family anchor before the PUT. Absent for phone/Web reactions
   # ("Você") and for contact reactions.
@@ -108,30 +102,13 @@ class Waha::ReactionApplier
   def anchor_message
     return @anchor_message if defined?(@anchor_message)
 
-    anchor_source_id = target_message.additional_attributes['edit_of'].presence
-    @anchor_message = anchor_source_id ? channel.inbox.messages.find_by(source_id: anchor_source_id) : target_message
+    @anchor_message = Waha::Anchoring.family_anchor_message(target_message)
   end
 
-  def create_activity(emoji, author)
-    conversation.messages.create!(
-      account_id: conversation.account_id,
-      inbox_id: conversation.inbox_id,
-      message_type: :activity,
-      content: I18n.t('conversations.activity.waha_reaction.reacted', author: author, emoji: emoji, quote: quote),
-      content_attributes: { waha_reaction: { emoji: emoji, target_message_id: target_message.id } }
-    )
-  end
-
-  def quote
-    text = target_message.content.to_s.strip
-    return text.truncate(QUOTE_LIMIT, omission: '…') if text.present?
-
-    media_placeholder
-  end
-
-  def media_placeholder
-    key = { 'image' => 'photo', 'video' => 'video', 'audio' => 'audio' }.fetch(target_message.attachments.first&.file_type, 'document')
-    I18n.t("conversations.activity.waha_reaction.media.#{key}")
+  # "5511999999999:23@s.whatsapp.net" -> "+5511999999999"
+  def formatted_number(jid)
+    digits = Waha::Jid.digits(jid)
+    digits.present? ? "+#{digits}" : jid.to_s
   end
 
   def conversation

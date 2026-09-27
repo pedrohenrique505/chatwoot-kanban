@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.1].define(version: 2026_07_21_120000) do
+ActiveRecord::Schema[7.1].define(version: 2026_09_08_120000) do
   # These extensions should be enabled to support this database
   enable_extension "pg_stat_statements"
   enable_extension "pg_trgm"
@@ -18,6 +18,14 @@ ActiveRecord::Schema[7.1].define(version: 2026_07_21_120000) do
   enable_extension "plpgsql"
   enable_extension "unaccent"
   enable_extension "vector"
+
+  execute <<~'SQL'
+    CREATE OR REPLACE FUNCTION public.immutable_unaccent(text)
+     RETURNS text
+     LANGUAGE sql
+     IMMUTABLE PARALLEL SAFE STRICT
+    AS $function$ SELECT public.unaccent('public.unaccent'::regdictionary, $1) $function$
+  SQL
 
   create_table "access_tokens", force: :cascade do |t|
     t.string "owner_type"
@@ -605,7 +613,12 @@ ActiveRecord::Schema[7.1].define(version: 2026_07_21_120000) do
     t.boolean "connected_number_locked", default: false, null: false
     t.jsonb "import_state", default: {}, null: false
     t.integer "import_on_connect_months"
+    t.boolean "typing_simulation_enabled", default: true, null: false
+    t.string "normalized_waha_url"
+    t.string "normalized_session_name"
+    t.boolean "connection_identity_conflict", default: false, null: false
     t.index ["account_id"], name: "index_channel_waha_on_account_id"
+    t.index ["normalized_waha_url", "normalized_session_name"], name: "index_channel_waha_on_connection_identity", unique: true, where: "(connection_identity_conflict = false)"
     t.index ["webhook_token"], name: "index_channel_waha_on_webhook_token", unique: true
   end
 
@@ -691,7 +704,10 @@ ActiveRecord::Schema[7.1].define(version: 2026_07_21_120000) do
     t.string "country_code", default: ""
     t.boolean "blocked", default: false, null: false
     t.bigint "company_id"
+    t.index "immutable_unaccent(lower((name)::text)) gin_trgm_ops", name: "index_contacts_on_name_trgm", using: :gin
+    t.index "lower((email)::text) gin_trgm_ops", name: "index_contacts_on_email_trgm", using: :gin
     t.index "lower((email)::text), account_id", name: "index_contacts_on_lower_email_account_id"
+    t.index "regexp_replace((phone_number)::text, '\\D'::text, ''::text, 'g'::text) gin_trgm_ops", name: "index_contacts_on_phone_digits_trgm", using: :gin
     t.index ["account_id", "contact_type"], name: "index_contacts_on_account_id_and_contact_type"
     t.index ["account_id", "email", "phone_number", "identifier"], name: "index_contacts_on_nonempty_fields", where: "(((email)::text <> ''::text) OR ((phone_number)::text <> ''::text) OR ((identifier)::text <> ''::text))"
     t.index ["account_id", "last_activity_at"], name: "index_contacts_on_account_id_and_last_activity_at", order: { last_activity_at: "DESC NULLS LAST" }
@@ -1041,6 +1057,72 @@ ActiveRecord::Schema[7.1].define(version: 2026_07_21_120000) do
     t.jsonb "settings", default: {}
   end
 
+  create_table "kanban_automation_logs", force: :cascade do |t|
+    t.bigint "account_id", null: false
+    t.bigint "kanban_automation_rule_id", null: false
+    t.bigint "kanban_card_id"
+    t.string "event_name", null: false
+    t.string "status", null: false
+    t.jsonb "details", default: {}, null: false
+    t.datetime "created_at", null: false
+    t.index ["account_id"], name: "index_kanban_automation_logs_on_account_id"
+    t.index ["created_at"], name: "index_kanban_automation_logs_on_created_at"
+    t.index ["kanban_automation_rule_id", "created_at"], name: "index_kanban_automation_logs_on_rule_and_created_at"
+    t.index ["kanban_automation_rule_id"], name: "index_kanban_automation_logs_on_kanban_automation_rule_id"
+    t.index ["kanban_card_id", "created_at"], name: "index_kanban_automation_logs_on_card_and_created_at"
+  end
+
+  create_table "kanban_automation_rules", force: :cascade do |t|
+    t.bigint "account_id", null: false
+    t.bigint "kanban_board_id", null: false
+    t.string "name", null: false
+    t.text "description"
+    t.string "event_name", null: false
+    t.jsonb "conditions", default: [], null: false
+    t.jsonb "actions", default: [], null: false
+    t.integer "position", default: 0, null: false
+    t.boolean "active", default: false, null: false
+    t.boolean "dry_run", default: true, null: false
+    t.boolean "stop_after_match", default: false, null: false
+    t.bigint "created_by_id"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.integer "threshold_hours"
+    t.index ["account_id"], name: "index_kanban_automation_rules_on_account_id"
+    t.index ["created_by_id"], name: "index_kanban_automation_rules_on_created_by_id"
+    t.index ["kanban_board_id", "event_name", "active"], name: "index_kanban_automation_rules_on_board_event_active"
+    t.index ["kanban_board_id"], name: "index_kanban_automation_rules_on_kanban_board_id"
+  end
+
+  create_table "kanban_board_entry_rule_inboxes", force: :cascade do |t|
+    t.bigint "account_id", null: false
+    t.bigint "kanban_board_id", null: false
+    t.bigint "kanban_board_entry_rule_id", null: false
+    t.bigint "inbox_id", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["account_id"], name: "index_kanban_board_entry_rule_inboxes_on_account_id"
+    t.index ["kanban_board_entry_rule_id", "inbox_id"], name: "index_entry_rule_inboxes_on_rule_and_inbox", unique: true
+    t.index ["kanban_board_id", "inbox_id"], name: "index_entry_rule_inboxes_on_board_and_inbox"
+  end
+
+  create_table "kanban_board_entry_rules", force: :cascade do |t|
+    t.bigint "account_id", null: false
+    t.bigint "kanban_board_id", null: false
+    t.bigint "kanban_stage_id"
+    t.string "name", null: false
+    t.boolean "active", default: true, null: false
+    t.boolean "all_inboxes", default: false, null: false
+    t.integer "position", default: 0, null: false
+    t.jsonb "conditions", default: [], null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["account_id"], name: "index_kanban_board_entry_rules_on_account_id"
+    t.index ["kanban_board_id", "active"], name: "index_kanban_board_entry_rules_on_kanban_board_id_and_active"
+    t.index ["kanban_board_id", "position"], name: "index_kanban_board_entry_rules_on_kanban_board_id_and_position"
+    t.index ["kanban_stage_id"], name: "index_kanban_board_entry_rules_on_kanban_stage_id"
+  end
+
   create_table "kanban_board_inboxes", force: :cascade do |t|
     t.bigint "account_id", null: false
     t.bigint "kanban_board_id", null: false
@@ -1073,10 +1155,20 @@ ActiveRecord::Schema[7.1].define(version: 2026_07_21_120000) do
     t.boolean "use_opportunity_card_reads", default: true, null: false
     t.string "visibility_mode", default: "all_agents", null: false
     t.string "inbox_scope_mode", default: "all_inboxes", null: false
+    t.bigint "won_stage_id"
+    t.bigint "lost_stage_id"
+    t.boolean "lost_reason_required", default: false, null: false
+    t.boolean "won_recurrence_enabled", default: false, null: false
+    t.integer "won_recurrence_window_minutes"
+    t.boolean "lost_recurrence_enabled", default: false, null: false
+    t.integer "lost_recurrence_window_minutes"
+    t.jsonb "automation_settings", default: {}, null: false
     t.index ["account_id", "active"], name: "index_kanban_boards_on_account_id_and_active"
     t.index ["account_id", "name"], name: "index_active_kanban_boards_on_account_id_and_name", unique: true, where: "(active = true)"
     t.index ["account_id", "position"], name: "index_kanban_boards_on_account_id_and_position"
     t.index ["account_id"], name: "index_kanban_boards_on_account_id"
+    t.index ["lost_stage_id"], name: "index_kanban_boards_on_lost_stage_id"
+    t.index ["won_stage_id"], name: "index_kanban_boards_on_won_stage_id"
   end
 
   create_table "kanban_card_assignees", force: :cascade do |t|
@@ -1089,6 +1181,67 @@ ActiveRecord::Schema[7.1].define(version: 2026_07_21_120000) do
     t.index ["kanban_card_id", "user_id"], name: "index_kanban_card_assignees_on_kanban_card_id_and_user_id", unique: true
     t.index ["kanban_card_id"], name: "index_kanban_card_assignees_on_kanban_card_id"
     t.index ["user_id"], name: "index_kanban_card_assignees_on_user_id"
+  end
+
+  create_table "kanban_card_events", force: :cascade do |t|
+    t.bigint "account_id", null: false
+    t.bigint "kanban_card_id"
+    t.bigint "kanban_board_id", null: false
+    t.bigint "user_id"
+    t.string "event_type", null: false
+    t.jsonb "metadata", default: {}, null: false
+    t.datetime "created_at", null: false
+    t.index ["account_id"], name: "index_kanban_card_events_on_account_id"
+    t.index ["kanban_board_id", "event_type", "created_at"], name: "idx_on_kanban_board_id_event_type_created_at_095a845e7f"
+    t.index ["kanban_board_id"], name: "index_kanban_card_events_on_kanban_board_id"
+    t.index ["kanban_card_id", "created_at"], name: "index_kanban_card_events_on_kanban_card_id_and_created_at"
+    t.index ["kanban_card_id"], name: "index_kanban_card_events_on_kanban_card_id"
+    t.index ["user_id"], name: "index_kanban_card_events_on_user_id"
+  end
+
+  create_table "kanban_card_field_values", force: :cascade do |t|
+    t.bigint "account_id", null: false
+    t.bigint "kanban_card_id", null: false
+    t.bigint "kanban_custom_field_id", null: false
+    t.jsonb "value", default: [], null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["account_id"], name: "index_kanban_card_field_values_on_account_id"
+    t.index ["kanban_card_id", "kanban_custom_field_id"], name: "index_kanban_card_field_values_on_card_and_field", unique: true
+    t.index ["kanban_card_id"], name: "index_kanban_card_field_values_on_kanban_card_id"
+    t.index ["kanban_custom_field_id"], name: "index_kanban_card_field_values_on_kanban_custom_field_id"
+  end
+
+  create_table "kanban_card_notes", force: :cascade do |t|
+    t.bigint "account_id", null: false
+    t.bigint "kanban_card_id", null: false
+    t.bigint "user_id"
+    t.text "content", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["account_id"], name: "index_kanban_card_notes_on_account_id"
+    t.index ["kanban_card_id", "created_at"], name: "index_kanban_card_notes_on_kanban_card_id_and_created_at"
+    t.index ["kanban_card_id"], name: "index_kanban_card_notes_on_kanban_card_id"
+    t.index ["user_id"], name: "index_kanban_card_notes_on_user_id"
+  end
+
+  create_table "kanban_card_products", force: :cascade do |t|
+    t.bigint "account_id", null: false
+    t.bigint "kanban_card_id", null: false
+    t.string "sku"
+    t.string "name", null: false
+    t.string "brand"
+    t.string "image_url"
+    t.integer "quantity", default: 1, null: false
+    t.decimal "unit_price", precision: 12, scale: 2, null: false
+    t.integer "price_type", default: 0, null: false
+    t.string "price_list"
+    t.integer "position", default: 0, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.integer "item_type", default: 0, null: false
+    t.index ["account_id"], name: "index_kanban_card_products_on_account_id"
+    t.index ["kanban_card_id"], name: "index_kanban_card_products_on_kanban_card_id"
   end
 
   create_table "kanban_cards", force: :cascade do |t|
@@ -1110,6 +1263,12 @@ ActiveRecord::Schema[7.1].define(version: 2026_07_21_120000) do
     t.datetime "stage_entered_at", null: false
     t.text "description"
     t.integer "priority"
+    t.bigint "kanban_reason_id"
+    t.bigint "previous_stage_id"
+    t.bigint "recreated_from_card_id"
+    t.integer "discount_type", default: 0, null: false
+    t.decimal "discount_amount", precision: 12, scale: 2
+    t.index "immutable_unaccent(lower((subject)::text)) gin_trgm_ops", name: "index_kanban_cards_on_subject_trgm", where: "(active = true)", using: :gin
     t.index ["account_id", "active"], name: "index_kanban_cards_on_account_id_and_active"
     t.index ["account_id", "contact_id"], name: "index_kanban_cards_on_account_id_and_contact_id"
     t.index ["account_id", "inbox_id"], name: "index_kanban_cards_on_account_id_and_inbox_id"
@@ -1117,8 +1276,42 @@ ActiveRecord::Schema[7.1].define(version: 2026_07_21_120000) do
     t.index ["kanban_board_id", "active"], name: "index_kanban_cards_on_kanban_board_id_and_active"
     t.index ["kanban_board_id", "contact_id", "inbox_id", "normalized_subject"], name: "index_active_manual_kanban_cards_unique_subject", unique: true, where: "((active = true) AND ((origin)::text = 'manual'::text) AND (normalized_subject IS NOT NULL))"
     t.index ["kanban_board_id", "conversation_id", "inbox_id", "normalized_subject"], name: "index_kanban_cards_on_conversation_subject_unique", unique: true, where: "(((origin)::text = 'conversation'::text) AND (conversation_id IS NOT NULL) AND (normalized_subject IS NOT NULL))"
+    t.index ["kanban_board_id", "due_at"], name: "idx_active_kanban_cards_board_due_at", where: "(active = true)"
     t.index ["kanban_board_id", "kanban_stage_id", "position", "created_at", "id"], name: "index_active_kanban_cards_on_board_stage_order", where: "(active = true)"
     t.index ["kanban_board_id", "kanban_stage_id", "position"], name: "index_kanban_cards_on_board_stage_position"
+    t.index ["kanban_board_id", "stage_entered_at"], name: "idx_active_kanban_cards_board_stage_entered_at", where: "(active = true)"
+    t.index ["kanban_reason_id"], name: "index_kanban_cards_on_kanban_reason_id"
+    t.index ["previous_stage_id"], name: "index_kanban_cards_on_previous_stage_id"
+    t.index ["recreated_from_card_id"], name: "index_kanban_cards_on_recreated_from_card_id"
+  end
+
+  create_table "kanban_custom_fields", force: :cascade do |t|
+    t.bigint "account_id", null: false
+    t.bigint "kanban_board_id", null: false
+    t.string "key", null: false
+    t.integer "field_type", default: 0, null: false
+    t.boolean "multiple", default: false, null: false
+    t.integer "position", default: 0, null: false
+    t.boolean "active", default: true, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["account_id"], name: "index_kanban_custom_fields_on_account_id"
+    t.index ["kanban_board_id", "key"], name: "index_active_kanban_custom_fields_on_board_id_and_key", unique: true, where: "(active = true)"
+    t.index ["kanban_board_id"], name: "index_kanban_custom_fields_on_kanban_board_id"
+  end
+
+  create_table "kanban_reasons", force: :cascade do |t|
+    t.bigint "account_id", null: false
+    t.bigint "kanban_board_id", null: false
+    t.string "title", null: false
+    t.text "description"
+    t.integer "reason_type", default: 0, null: false
+    t.integer "position", default: 0, null: false
+    t.boolean "active", default: true, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["account_id"], name: "index_kanban_reasons_on_account_id"
+    t.index ["kanban_board_id"], name: "index_kanban_reasons_on_kanban_board_id"
   end
 
   create_table "kanban_stages", force: :cascade do |t|
@@ -1129,7 +1322,9 @@ ActiveRecord::Schema[7.1].define(version: 2026_07_21_120000) do
     t.boolean "active", default: true, null: false
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
-    t.string "color", default: "slate", null: false
+    t.string "color", default: "#8B8D98", null: false
+    t.text "description"
+    t.integer "sla_hours"
     t.index ["account_id", "active"], name: "index_kanban_stages_on_account_id_and_active"
     t.index ["account_id"], name: "index_kanban_stages_on_account_id"
     t.index ["kanban_board_id", "name"], name: "index_active_kanban_stages_on_board_id_and_name", unique: true, where: "(active = true)"
@@ -1497,6 +1692,56 @@ ActiveRecord::Schema[7.1].define(version: 2026_07_21_120000) do
     t.index ["uid", "provider"], name: "index_users_on_uid_and_provider", unique: true
   end
 
+  create_table "waha_contact_aliases", force: :cascade do |t|
+    t.bigint "channel_waha_id", null: false
+    t.bigint "contact_inbox_id", null: false
+    t.string "alias_type", null: false
+    t.string "value", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["channel_waha_id", "alias_type", "value"], name: "index_waha_contact_aliases_on_identity", unique: true
+    t.index ["channel_waha_id"], name: "index_waha_contact_aliases_on_channel_waha_id"
+    t.index ["contact_inbox_id"], name: "index_waha_contact_aliases_on_contact_inbox_id"
+  end
+
+  create_table "waha_delivery_attempts", force: :cascade do |t|
+    t.bigint "channel_waha_id", null: false
+    t.bigint "message_id", null: false
+    t.string "chat_jid", null: false
+    t.integer "status", default: 0, null: false
+    t.string "client_message_id"
+    t.string "external_id"
+    t.integer "attempt_count", default: 0, null: false
+    t.datetime "dispatched_at"
+    t.text "last_error"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["channel_waha_id", "client_message_id"], name: "index_waha_delivery_attempts_on_client_message_id", unique: true, where: "(client_message_id IS NOT NULL)"
+    t.index ["channel_waha_id", "external_id"], name: "index_waha_delivery_attempts_on_external_id", unique: true, where: "(external_id IS NOT NULL)"
+    t.index ["channel_waha_id"], name: "index_waha_delivery_attempts_on_channel_waha_id"
+    t.index ["message_id"], name: "index_waha_delivery_attempts_on_message_id", unique: true
+  end
+
+  create_table "waha_delivery_parts", force: :cascade do |t|
+    t.bigint "waha_delivery_attempt_id", null: false
+    t.bigint "attachment_id"
+    t.integer "position", null: false
+    t.integer "part_type", null: false
+    t.integer "status", default: 0, null: false
+    t.string "client_message_id"
+    t.text "source_id"
+    t.string "external_id"
+    t.datetime "dispatched_at"
+    t.datetime "confirmed_at"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.integer "ack_status"
+    t.index ["attachment_id"], name: "index_waha_delivery_parts_on_attachment_id"
+    t.index ["client_message_id"], name: "index_waha_delivery_parts_on_client_message_id", where: "(client_message_id IS NOT NULL)"
+    t.index ["waha_delivery_attempt_id", "position"], name: "index_waha_delivery_parts_on_attempt_and_position", unique: true
+    t.index ["waha_delivery_attempt_id"], name: "index_waha_delivery_parts_on_waha_delivery_attempt_id"
+  end
+
   create_table "waha_import_chats", force: :cascade do |t|
     t.bigint "channel_waha_id", null: false
     t.string "chat_id", null: false
@@ -1506,9 +1751,46 @@ ActiveRecord::Schema[7.1].define(version: 2026_07_21_120000) do
     t.string "error"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.bigint "media_message_ids", default: [], null: false, array: true
+    t.string "cursor_message_id"
+    t.string "execution_id"
+    t.string "pass_id"
+    t.integer "pass_number", default: 1, null: false
+    t.integer "discovered_pass", default: 1, null: false
+    t.integer "attempts", default: 0, null: false
+    t.datetime "next_attempt_at"
+    t.string "lease_token"
+    t.datetime "lease_expires_at"
+    t.integer "pass_imported_count", default: 0, null: false
+    t.integer "observed_message_count", default: 0, null: false
+    t.string "observed_message_digest"
+    t.integer "pass_observed_message_count", default: 0, null: false
+    t.string "pass_observed_message_digest"
     t.index ["channel_waha_id", "chat_id"], name: "index_waha_import_chats_on_channel_waha_id_and_chat_id", unique: true
+    t.index ["channel_waha_id", "execution_id", "pass_id", "status"], name: "index_waha_import_chats_on_pass_claim"
     t.index ["channel_waha_id", "status"], name: "index_waha_import_chats_on_channel_waha_id_and_status"
     t.index ["channel_waha_id"], name: "index_waha_import_chats_on_channel_waha_id"
+    t.index ["lease_expires_at"], name: "index_waha_import_chats_on_lease_expires_at"
+  end
+
+  create_table "waha_message_mappings", force: :cascade do |t|
+    t.bigint "channel_waha_id", null: false
+    t.bigint "message_id", null: false
+    t.string "chat_jid", null: false
+    t.string "external_id", null: false
+    t.string "participant_jid"
+    t.integer "direction", null: false
+    t.integer "event_type", default: 0, null: false
+    t.integer "part", default: 0, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.text "provider_id"
+    t.boolean "ambiguous", default: false, null: false
+    t.bigint "anchor_message_id"
+    t.index ["anchor_message_id"], name: "index_waha_message_mappings_on_anchor_message_id"
+    t.index ["channel_waha_id", "chat_jid", "external_id", "event_type"], name: "index_waha_message_mappings_on_identity", unique: true
+    t.index ["channel_waha_id"], name: "index_waha_message_mappings_on_channel_waha_id"
+    t.index ["message_id"], name: "index_waha_message_mappings_on_message_id"
   end
 
   create_table "webhooks", force: :cascade do |t|
@@ -1554,6 +1836,18 @@ ActiveRecord::Schema[7.1].define(version: 2026_07_21_120000) do
   add_foreign_key "conversation_pins", "conversations"
   add_foreign_key "conversation_pins", "users"
   add_foreign_key "inboxes", "portals"
+  add_foreign_key "kanban_automation_logs", "kanban_automation_rules", on_delete: :cascade
+  add_foreign_key "kanban_automation_logs", "kanban_cards", on_delete: :nullify
+  add_foreign_key "kanban_automation_rules", "accounts"
+  add_foreign_key "kanban_automation_rules", "kanban_boards"
+  add_foreign_key "kanban_automation_rules", "users", column: "created_by_id"
+  add_foreign_key "kanban_board_entry_rule_inboxes", "accounts"
+  add_foreign_key "kanban_board_entry_rule_inboxes", "inboxes"
+  add_foreign_key "kanban_board_entry_rule_inboxes", "kanban_board_entry_rules"
+  add_foreign_key "kanban_board_entry_rule_inboxes", "kanban_boards"
+  add_foreign_key "kanban_board_entry_rules", "accounts"
+  add_foreign_key "kanban_board_entry_rules", "kanban_boards"
+  add_foreign_key "kanban_board_entry_rules", "kanban_stages"
   add_foreign_key "kanban_board_inboxes", "accounts"
   add_foreign_key "kanban_board_inboxes", "inboxes"
   add_foreign_key "kanban_board_inboxes", "kanban_boards"
@@ -1563,7 +1857,34 @@ ActiveRecord::Schema[7.1].define(version: 2026_07_21_120000) do
   add_foreign_key "kanban_card_assignees", "accounts"
   add_foreign_key "kanban_card_assignees", "kanban_cards"
   add_foreign_key "kanban_card_assignees", "users"
+  add_foreign_key "kanban_card_events", "accounts"
+  add_foreign_key "kanban_card_events", "kanban_boards"
+  add_foreign_key "kanban_card_events", "kanban_cards", on_delete: :nullify
+  add_foreign_key "kanban_card_events", "users", on_delete: :nullify
+  add_foreign_key "kanban_card_field_values", "accounts"
+  add_foreign_key "kanban_card_field_values", "kanban_cards"
+  add_foreign_key "kanban_card_field_values", "kanban_custom_fields"
+  add_foreign_key "kanban_card_notes", "accounts"
+  add_foreign_key "kanban_card_notes", "kanban_cards"
+  add_foreign_key "kanban_card_notes", "users", on_delete: :nullify
+  add_foreign_key "kanban_card_products", "accounts"
+  add_foreign_key "kanban_card_products", "kanban_cards"
+  add_foreign_key "kanban_cards", "kanban_cards", column: "recreated_from_card_id", on_delete: :nullify
+  add_foreign_key "kanban_cards", "kanban_stages", column: "previous_stage_id", on_delete: :nullify
+  add_foreign_key "kanban_custom_fields", "accounts"
+  add_foreign_key "kanban_custom_fields", "kanban_boards"
+  add_foreign_key "kanban_reasons", "accounts"
+  add_foreign_key "kanban_reasons", "kanban_boards"
+  add_foreign_key "waha_contact_aliases", "channel_waha", on_delete: :cascade
+  add_foreign_key "waha_contact_aliases", "contact_inboxes", on_delete: :cascade
+  add_foreign_key "waha_delivery_attempts", "channel_waha"
+  add_foreign_key "waha_delivery_attempts", "messages"
+  add_foreign_key "waha_delivery_parts", "attachments", on_delete: :nullify
+  add_foreign_key "waha_delivery_parts", "waha_delivery_attempts"
   add_foreign_key "waha_import_chats", "channel_waha"
+  add_foreign_key "waha_message_mappings", "channel_waha"
+  add_foreign_key "waha_message_mappings", "messages"
+  add_foreign_key "waha_message_mappings", "messages", column: "anchor_message_id"
   create_trigger("accounts_after_insert_row_tr", :generated => true, :compatibility => 1).
       on("accounts").
       after(:insert).

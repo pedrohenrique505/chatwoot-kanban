@@ -88,7 +88,7 @@
       "JOIN_CALL": "Join call"
     },
     "HEADER": {
-      "RESOLVE_ACTION": "Resolver",
+      "RESOLVE_ACTION": "Finalizar",
       "REOPEN_ACTION": "Reabrir",
       "OPEN_ACTION": "Abertas",
       "MORE_ACTIONS": "Mais ações",
@@ -151,7 +151,7 @@
     },
     "CARD_CONTEXT_MENU": {
       "PENDING": "Marcar como pendente",
-      "RESOLVED": "Marcar como resolvida",
+      "RESOLVED": "Marcar como finalizada",
       "MARK_AS_UNREAD": "Marcar como não lida",
       "MARK_AS_READ": "Marcar como lida",
       "REOPEN": "Reabrir conversa",
@@ -215,6 +215,7 @@
       "TIP_AUDIORECORDER_ICON": "Gravar áudio",
       "TIP_AUDIORECORDER_PERMISSION": "Permitir acesso ao áudio",
       "TIP_AUDIORECORDER_ERROR": "Não foi possível abrir o áudio",
+      "TIP_AUDIORECORDER_NO_DEVICE": "Nenhum microfone encontrado. Conecte um e verifique as configurações de som do seu sistema.",
       "DRAG_DROP": "Arrastar e soltar aqui para anexar",
       "START_AUDIO_RECORDING": "Iniciar gravação de áudio",
       "STOP_AUDIO_RECORDING": "Parar gravação de áudio",

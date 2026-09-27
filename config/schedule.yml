@@ -61,6 +61,19 @@ periodic_assignment_job:
   class: 'AutoAssignment::PeriodicAssignmentJob'
   queue: scheduled_jobs
 
+# executed every 15 minutes for time-based Kanban automation rules
+kanban_automation_scan_time_based_job:
+  cron: '*/15 * * * *'
+  class: 'KanbanAutomations::ScanTimeBasedJob'
+  queue: scheduled_jobs
+
+# executed daily at 2230 UTC
+# removes Kanban automation logs older than 90 days
+kanban_automation_purge_logs_job:
+  cron: '30 22 * * *'
+  class: 'KanbanAutomations::PurgeLogsJob'
+  queue: purgable
+
 # executed daily at 2230 UTC
 # removes old notifications (>1 month) and trims to 300 per user
 remove_old_notification_job:
@@ -74,3 +87,20 @@ remove_orphan_conversations_job:
   cron: '0 */12 * * *'
   class: 'Internal::RemoveOrphanConversationsJob'
   queue: housekeeping
+
+# executed every 30 minutes
+# safety net for WAHA silently dropping live events under internal load (no
+# disconnect to trigger the existing reconnect gap-fill): re-syncs each
+# connected channel's recent history so nothing gets permanently lost
+waha_periodic_gap_fill_job:
+  cron: '*/30 * * * *'
+  class: 'Waha::PeriodicGapFillJob'
+  queue: scheduled_jobs
+
+# executed every minute
+# recovers WAHA history dispatchers/workers lost during a crash or deploy and
+# reclaims chat rows whose persisted lease expired
+waha_history_import_reconciler_job:
+  cron: '*/1 * * * *'
+  class: 'Waha::HistoryImportReconcilerJob'
+  queue: scheduled_jobs

@@ -8,7 +8,7 @@ RSpec.describe 'Conversation Kanban Cards API', type: :request do
   let(:inbox) { create(:inbox, account: account, name: 'Sales Inbox') }
   let(:conversation) { create(:conversation, account: account, contact: contact, inbox: inbox) }
   let(:kanban_board) { create(:kanban_board, account: account, name: 'Sales', position: 1) }
-  let(:stage) { create(:kanban_stage, account: account, kanban_board: kanban_board, name: 'New', color: 'blue', position: 1) }
+  let(:stage) { create(:kanban_stage, account: account, kanban_board: kanban_board, name: 'New', color: '#2781F6', position: 1) }
 
   before do
     create(:inbox_member, user: agent, inbox: inbox)
@@ -123,12 +123,16 @@ RSpec.describe 'Conversation Kanban Cards API', type: :request do
           'subject' => 'Maria Silva - Sales Inbox',
           'due_at' => card.due_at.iso8601,
           'priority' => nil,
+          'value' => '0.0',
+          'kanban_reason_id' => nil,
+          'custom_field_keys' => [],
+          'stage_entered_at' => card.stage_entered_at.iso8601,
           'labels' => [
             { 'id' => label.id, 'title' => 'urgente', 'color' => '#ff0000', 'description' => nil }
           ],
           'assignees' => [],
           'kanban_board' => { 'id' => kanban_board.id, 'name' => 'Sales' },
-          'kanban_stage' => { 'id' => stage.id, 'name' => 'New', 'color' => 'blue' },
+          'kanban_stage' => { 'id' => stage.id, 'name' => 'New', 'color' => stage.color, 'sla_hours' => stage.sla_hours },
           'conversation_id' => conversation.display_id
         }
       )
@@ -166,21 +170,22 @@ RSpec.describe 'Conversation Kanban Cards API', type: :request do
   end
 
   describe 'POST /api/v1/accounts/{account.id}/conversations/{conversation.display_id}/kanban_cards' do
-    it 'creates a conversation-origin card at position 1' do
+    it 'creates a conversation-origin card at the top of the stage' do
       expect do
         post_conversation_kanban_card
       end.to change(KanbanCard.conversation, :count).by(1)
 
       expect(response).to have_http_status(:created)
-      expect(KanbanCard.last).to have_attributes(origin: 'conversation', position: 1)
+      expect(KanbanCard.last).to have_attributes(origin: 'conversation', position: 1000)
     end
 
-    it 'shifts existing active cards by one' do
-      existing_card = create_manual_card(position: 1)
+    it 'leaves the cards already in the stage where they are' do
+      existing_card = create_manual_card(position: 1000)
 
       post_conversation_kanban_card
 
-      expect(existing_card.reload.position).to eq(2)
+      expect(existing_card.reload.position).to eq(1000)
+      expect(KanbanCard.stage_active_cards(kanban_board, stage).pluck(:id)).to eq([KanbanCard.last.id, existing_card.id])
     end
 
     it 'uses conversation contact and inbox' do
@@ -285,7 +290,7 @@ RSpec.describe 'Conversation Kanban Cards API', type: :request do
     end
 
     it 'rejects board when inbox is not in selected_inboxes scope' do
-      kanban_board.update!(inbox_scope_mode: 'selected_inboxes')
+      restrict_board_to_inboxes(kanban_board)
 
       post_conversation_kanban_card
 
@@ -294,8 +299,7 @@ RSpec.describe 'Conversation Kanban Cards API', type: :request do
     end
 
     it 'accepts board when inbox is selected in selected_inboxes scope' do
-      kanban_board.update!(inbox_scope_mode: 'selected_inboxes')
-      create(:kanban_board_inbox, account: account, kanban_board: kanban_board, inbox: inbox)
+      restrict_board_to_inboxes(kanban_board, inbox)
 
       post_conversation_kanban_card
 

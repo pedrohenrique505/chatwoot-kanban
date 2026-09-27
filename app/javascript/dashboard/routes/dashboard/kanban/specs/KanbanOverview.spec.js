@@ -2,7 +2,6 @@ import { shallowMount, flushPromises } from '@vue/test-utils';
 import { nextTick } from 'vue';
 import { createStore } from 'vuex';
 import KanbanOverview from '../KanbanOverview.vue';
-import KanbanCreateBoardDialog from '../KanbanCreateBoardDialog.vue';
 import KanbanBoardsAPI from 'dashboard/api/kanbanBoards';
 import kanbanBoardsModule from 'dashboard/store/modules/kanbanBoards';
 import { COLOR_OPTIONS } from 'dashboard/components-next/button/constants';
@@ -14,6 +13,12 @@ vi.mock('vue-i18n', () => ({
     t: (key, params) => {
       const translations = {
         'KANBAN.OVERVIEW.CREATE_BOARD': 'Adicionar Funil',
+        'KANBAN.OVERVIEW.EMPTY_TITLE': 'Crie seu primeiro funil',
+        'KANBAN.OVERVIEW.EMPTY_DESCRIPTION':
+          'Organize seu processo de vendas criando etapas em um funil de vendas.',
+        'KANBAN.OVERVIEW.TIP_TITLE': 'Dica rápida',
+        'KANBAN.OVERVIEW.TIP_DESCRIPTION':
+          'Organize suas oportunidades em estágios claros.',
         'KANBAN.ACTIONS.CONFIRM_CREATE_BOARD': 'Criar funil',
         'KANBAN.ACTIONS.CANCEL_CREATE_BOARD': 'Cancelar criação do funil',
         'KANBAN.ACTIONS.CREATE_BOARD_ERROR':
@@ -43,12 +48,14 @@ vi.mock('dashboard/composables', () => ({
 vi.mock('dashboard/api/kanbanBoards', () => ({
   default: {
     get: vi.fn(),
-    create: vi.fn(),
   },
 }));
 
 const createTestStore = (role = 'agent') =>
   createStore({
+    getters: {
+      getCurrentRole: () => role,
+    },
     modules: {
       kanbanBoards: { namespaced: true, ...kanbanBoardsModule },
       auth: {
@@ -99,9 +106,6 @@ const mountOverview = async (role = 'agent') => {
   return wrapper;
 };
 
-const findCreateBoardDialog = wrapper =>
-  wrapper.findComponent(KanbanCreateBoardDialog);
-
 describe('KanbanOverview', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -111,7 +115,7 @@ describe('KanbanOverview', () => {
   it('renders the overview page without redirecting', async () => {
     const wrapper = await mountOverview();
 
-    expect(wrapper.text()).toContain('KANBAN.OVERVIEW.TITLE');
+    expect(wrapper.text()).toContain('Crie seu primeiro funil');
   });
 
   it('shows loading state', async () => {
@@ -136,7 +140,7 @@ describe('KanbanOverview', () => {
     await flushPromises();
     await nextTick();
 
-    expect(wrapper.text()).toContain('KANBAN.OVERVIEW.EMPTY_ADMIN');
+    expect(wrapper.text()).toContain('Crie seu primeiro funil');
   });
 
   it('shows empty state for agent', async () => {
@@ -144,7 +148,7 @@ describe('KanbanOverview', () => {
     await flushPromises();
     await nextTick();
 
-    expect(wrapper.text()).toContain('KANBAN.OVERVIEW.EMPTY_AGENT');
+    expect(wrapper.text()).toContain('Crie seu primeiro funil');
   });
 
   it('lists visible boards', async () => {
@@ -201,7 +205,7 @@ describe('KanbanOverview', () => {
       '[data-testid="overview-create-board-button"]'
     );
     expect(createButton.exists()).toBe(true);
-    expect(createButton.text()).toContain('Adicionar Funil');
+    expect(createButton.text()).toContain('Criar funil');
   });
 
   it('renders only one create button in the overview', async () => {
@@ -217,7 +221,9 @@ describe('KanbanOverview', () => {
     expect(createButtons).toHaveLength(1);
     expect(
       wrapper
-        .find('header [data-testid="overview-create-board-button"]')
+        .find(
+          '[data-testid="overview-empty-state"] [data-testid="overview-create-board-button"]'
+        )
         .exists()
     ).toBe(true);
   });
@@ -232,19 +238,6 @@ describe('KanbanOverview', () => {
 
     const header = wrapper.find('header');
     const createButton = header.find(
-      '[data-testid="overview-create-board-button"]'
-    );
-
-    expect(createButton.exists()).toBe(true);
-    expect(createButton.text()).toContain('Adicionar Funil');
-  });
-
-  it('agent sees create button', async () => {
-    const wrapper = await mountOverview();
-    await flushPromises();
-    await nextTick();
-
-    const createButton = wrapper.find(
       '[data-testid="overview-create-board-button"]'
     );
 
@@ -271,7 +264,26 @@ describe('KanbanOverview', () => {
     });
   });
 
-  it('clicking create button opens the board creation modal', async () => {
+  it('clicking create button navigates to the create board form', async () => {
+    KanbanBoardsAPI.get.mockResolvedValue({
+      data: [{ id: 1, name: 'Sales Board' }],
+    });
+    const wrapper = await mountOverview('administrator');
+    await flushPromises();
+    await nextTick();
+
+    await wrapper
+      .find('[data-testid="overview-create-board-button"]')
+      .trigger('click');
+    await nextTick();
+
+    expect(mockPush).toHaveBeenCalledWith({
+      name: 'kanban_board_create_form',
+      params: { accountId: '1' },
+    });
+  });
+
+  it('hides the create button from agents', async () => {
     KanbanBoardsAPI.get.mockResolvedValue({
       data: [{ id: 1, name: 'Sales Board' }],
     });
@@ -279,37 +291,18 @@ describe('KanbanOverview', () => {
     await flushPromises();
     await nextTick();
 
-    await wrapper
-      .find('[data-testid="overview-create-board-button"]')
-      .trigger('click');
-    await nextTick();
-
-    expect(findCreateBoardDialog(wrapper).props('modelValue')).toBe(true);
-  });
-
-  it('closes the create modal from the reusable dialog', async () => {
-    const wrapper = await mountOverview();
-    await flushPromises();
-    await nextTick();
-
-    await wrapper
-      .find('[data-testid="overview-create-board-button"]')
-      .trigger('click');
-    await nextTick();
-
-    findCreateBoardDialog(wrapper).vm.$emit('close');
-    await nextTick();
-
-    expect(findCreateBoardDialog(wrapper).props('modelValue')).toBe(false);
+    expect(
+      wrapper.find('[data-testid="overview-create-board-button"]').exists()
+    ).toBe(false);
   });
 
   it('empty state does not render a second create button', async () => {
     KanbanBoardsAPI.get.mockResolvedValue({ data: [] });
-    const wrapper = await mountOverview();
+    const wrapper = await mountOverview('administrator');
     await flushPromises();
     await nextTick();
 
-    expect(wrapper.text()).toContain('KANBAN.OVERVIEW.EMPTY_AGENT');
+    expect(wrapper.text()).toContain('Crie seu primeiro funil');
     expect(
       wrapper.findAll('[data-testid="overview-create-board-button"]')
     ).toHaveLength(1);
@@ -323,8 +316,8 @@ describe('KanbanOverview', () => {
           name: 'Sales Board',
           cards_count: 6,
           stages_summary: [
-            { id: 11, name: 'Lead', color: 'blue', cards_count: 2 },
-            { id: 12, name: 'Won', color: 'green', cards_count: 4 },
+            { id: 11, name: 'Lead', color: '#2781F6', cards_count: 2 },
+            { id: 12, name: 'Won', color: '#22C55E', cards_count: 4 },
           ],
         },
       ],
@@ -403,39 +396,27 @@ describe('KanbanOverview', () => {
     expect(wrapper.text()).toContain('Email');
   });
 
-  it('creates board and navigates to it', async () => {
-    KanbanBoardsAPI.get.mockResolvedValue({ data: [] });
-    KanbanBoardsAPI.create.mockResolvedValue({
-      data: { id: 99, name: 'New Board' },
+  it('navigates to the create board form from the header button', async () => {
+    KanbanBoardsAPI.get.mockResolvedValue({
+      data: [{ id: 1, name: 'Sales Board' }],
     });
 
     const wrapper = await mountOverview('administrator');
     await flushPromises();
     await nextTick();
 
-    // Click create button
     const createBtn = wrapper.find('.btn-stub');
     await createBtn.trigger('click');
     await nextTick();
 
-    findCreateBoardDialog(wrapper).vm.$emit('create', 'New Board');
-    await flushPromises();
-    await nextTick();
-
-    expect(wrapper.dispatchSpy).toHaveBeenCalledWith(
-      'kanbanBoards/refreshBoards'
-    );
     expect(mockPush).toHaveBeenCalledWith({
-      name: 'kanban_board_show',
-      params: { accountId: '1', boardId: 99 },
+      name: 'kanban_board_create_form',
+      params: { accountId: '1' },
     });
   });
 
-  it('creates board from reusable dialog event and navigates to it', async () => {
+  it('navigates to the create board form from the empty state button', async () => {
     KanbanBoardsAPI.get.mockResolvedValue({ data: [] });
-    KanbanBoardsAPI.create.mockResolvedValue({
-      data: { id: 100, name: 'Enter Board' },
-    });
 
     const wrapper = await mountOverview('administrator');
     await flushPromises();
@@ -445,45 +426,10 @@ describe('KanbanOverview', () => {
       .find('[data-testid="overview-create-board-button"]')
       .trigger('click');
     await nextTick();
-    findCreateBoardDialog(wrapper).vm.$emit('create', 'Enter Board');
-    await flushPromises();
-    await nextTick();
 
-    expect(KanbanBoardsAPI.create).toHaveBeenCalledWith({
-      kanban_board: {
-        name: 'Enter Board',
-        position: 0,
-      },
-    });
-    expect(wrapper.dispatchSpy).toHaveBeenCalledWith(
-      'kanbanBoards/refreshBoards'
-    );
     expect(mockPush).toHaveBeenCalledWith({
-      name: 'kanban_board_show',
-      params: { accountId: '1', boardId: 100 },
+      name: 'kanban_board_create_form',
+      params: { accountId: '1' },
     });
-  });
-
-  it('passes create errors to the reusable dialog', async () => {
-    KanbanBoardsAPI.get.mockResolvedValue({ data: [] });
-    KanbanBoardsAPI.create.mockRejectedValue({
-      response: { data: { error: 'Name is already taken' } },
-    });
-
-    const wrapper = await mountOverview('administrator');
-    await flushPromises();
-    await nextTick();
-
-    await wrapper
-      .find('[data-testid="overview-create-board-button"]')
-      .trigger('click');
-    await nextTick();
-    findCreateBoardDialog(wrapper).vm.$emit('create', 'Existing Board');
-    await flushPromises();
-    await nextTick();
-
-    expect(findCreateBoardDialog(wrapper).props('error')).toBe(
-      'Name is already taken'
-    );
   });
 });

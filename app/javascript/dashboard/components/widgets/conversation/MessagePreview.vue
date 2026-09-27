@@ -3,10 +3,11 @@ import { MESSAGE_TYPE } from 'widget/helpers/constants';
 import { useMessageFormatter } from 'shared/composables/useMessageFormatter';
 import { ATTACHMENT_ICONS } from 'shared/constants/messages';
 import CardMutedIcon from 'dashboard/components-next/Conversation/ConversationCard/CardMutedIcon.vue';
+import MessageStatusIndicator from 'dashboard/components-next/message/MessageStatusIndicator.vue';
 
 export default {
   name: 'MessagePreview',
-  components: { CardMutedIcon },
+  components: { CardMutedIcon, MessageStatusIndicator },
   props: {
     message: {
       type: Object,
@@ -36,10 +37,6 @@ export default {
     };
   },
   computed: {
-    messageByAgent() {
-      const { message_type: messageType } = this.message;
-      return messageType === MESSAGE_TYPE.OUTGOING;
-    },
     isMessageAnActivity() {
       const { message_type: messageType } = this.message;
       return messageType === MESSAGE_TYPE.ACTIVITY;
@@ -80,17 +77,12 @@ export default {
         icon="lock-closed"
       />
       <fluent-icon
-        v-else-if="messageByAgent"
-        size="14"
-        class="-mt-0.5 text-n-slate-11 flex-shrink-0"
-        icon="checkmark-double"
-      />
-      <fluent-icon
         v-else-if="isMessageAnActivity"
         size="16"
         class="-mt-0.5 text-n-slate-11 flex-shrink-0"
         icon="info"
       />
+      <MessageStatusIndicator v-else :message="message" class="flex-shrink-0" />
     </template>
     <span
       v-if="message.content && isMessageSticker"

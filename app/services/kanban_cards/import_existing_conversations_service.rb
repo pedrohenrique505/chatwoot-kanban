@@ -2,17 +2,20 @@ class KanbanCards::ImportExistingConversationsService
   BATCH_SIZE = 1000
   GROUP_IDENTIFIER_PATTERN = '%@g.us%'.freeze
 
-  def initialize(account:, kanban_board:, ignore_groups: false)
+  def initialize(account:, kanban_board:, ignore_groups: false, entry_rule: nil)
     @account = account
     @kanban_board = kanban_board
     @ignore_groups = ActiveModel::Type::Boolean.new.cast(ignore_groups)
+    @entry_rule = entry_rule
     @summary = summary_hash
   end
 
   def perform!
     return summary unless default_stage
 
-    eligible_conversations.in_batches(of: BATCH_SIZE) do |batch|
+    sql_conversations = sql_filtered_conversations
+    (sql_conversations || eligible_conversations).in_batches(of: BATCH_SIZE) do |batch|
+      batch = batch.where(id: matching_conversation_ids(batch)) unless sql_conversations
       import_batch(batch)
     end
 
@@ -22,16 +25,67 @@ class KanbanCards::ImportExistingConversationsService
   def estimated_count
     return 0 unless default_stage
 
-    eligible_conversations.count
+    conversations = sql_filtered_conversations
+    return conversations.count if conversations
+
+    count = 0
+    eligible_conversations.in_batches(of: BATCH_SIZE) { |batch| count += matching_conversation_ids(batch).size }
+    count
   end
 
   private
 
-  attr_reader :account, :kanban_board, :ignore_groups, :summary
+  attr_reader :account, :kanban_board, :ignore_groups, :entry_rule, :summary
+
+  # A nil result means a future condition is not supported by the SQL filter yet. The
+  # matcher remains the compatibility path, so adding a condition cannot broaden imports.
+  def sql_filtered_conversations
+    return @sql_filtered_conversations if defined?(@sql_filtered_conversations)
+
+    @sql_filtered_conversations = KanbanBoardEntryRules::ConversationFilter.apply(eligible_conversations, entry_rule)
+  end
+
+  def matching_conversation_ids(batch)
+    batch.select(:id, :assignee_id, :team_id, :priority, :cached_label_list).filter_map do |conversation|
+      conversation.id if KanbanBoardEntryRules::Matcher.match?(conversation, entry_rule)
+    end
+  end
 
   def import_batch(batch)
-    inserted_count = KanbanCard.connection.exec_query(insert_sql(batch)).rows.length
-    summary[:created] += inserted_count
+    inserted_rows = KanbanCard.transaction do
+      rows = KanbanCard.connection.exec_query(insert_sql(batch)).to_a
+      record_card_created_events(rows)
+      rows
+    end
+
+    summary[:created] += inserted_rows.length
+  end
+
+  # Retroactive import deliberately does not fire `card_created` automations. A backfill
+  # of every existing conversation would hand a send_message rule the whole contact base
+  # at once, which is the failure the automation guardrails exist to prevent. Cards
+  # created from new conversations still trigger normally.
+  #
+  # Stays bulk: the events are built from the INSERT ... RETURNING rows, so an
+  # import costs two statements per batch instead of one per imported card.
+  def record_card_created_events(rows)
+    return if rows.empty?
+
+    recorded_at = Time.current
+    # rubocop:disable Rails/SkipsModelValidations
+    KanbanCardEvent.insert_all(
+      rows.map do |row|
+        {
+          account_id: row['account_id'],
+          kanban_card_id: row['id'],
+          kanban_board_id: row['kanban_board_id'],
+          event_type: 'card_created',
+          metadata: KanbanCards::RecordEventService.card_created_metadata(row),
+          created_at: recorded_at
+        }
+      end
+    )
+    # rubocop:enable Rails/SkipsModelValidations
   end
 
   def insert_sql(batch)
@@ -42,7 +96,7 @@ class KanbanCards::ImportExistingConversationsService
       ON CONFLICT (kanban_board_id, conversation_id, inbox_id, normalized_subject)
         WHERE origin = 'conversation' AND conversation_id IS NOT NULL AND normalized_subject IS NOT NULL
         DO NOTHING
-      RETURNING id
+      RETURNING id, account_id, kanban_board_id, kanban_stage_id, conversation_id, origin
     SQL
   end
 
@@ -124,7 +178,7 @@ class KanbanCards::ImportExistingConversationsService
                .where("NOT EXISTS (#{existing_card_relation.to_sql})")
                .order(:id)
 
-    relation = relation.where(inbox_id: allowed_inbox_ids) if kanban_board.selected_inboxes?
+    relation = relation.where(inbox_id: allowed_inbox_ids) if allowed_inbox_ids
     relation = exclude_group_conversations(relation) if ignore_groups
     relation
   end
@@ -138,8 +192,17 @@ class KanbanCards::ImportExistingConversationsService
       .where.not('LOWER(COALESCE(contact_inboxes.source_id, ?)) LIKE ?', '', GROUP_IDENTIFIER_PATTERN)
   end
 
+  # nil means "do not narrow": either the chosen rule covers every inbox, or no rule was
+  # chosen and the board's own derived scope already decides what is importable.
   def allowed_inbox_ids
-    @allowed_inbox_ids ||= kanban_board.kanban_board_inboxes.pluck(:inbox_id)
+    return @allowed_inbox_ids if defined?(@allowed_inbox_ids)
+
+    @allowed_inbox_ids =
+      if entry_rule.present?
+        entry_rule.all_inboxes? ? nil : entry_rule.inbox_ids
+      else
+        kanban_board.derived_inbox_scope.then { |scope| scope.fetch(:mode) == 'all_inboxes' ? nil : scope.fetch(:inbox_ids) }
+      end
   end
 
   def existing_card_relation

@@ -86,8 +86,7 @@ RSpec.describe 'Kanban stage cards API', type: :request do
     it 'ignores inbox ids outside the board scope' do
       second_inbox = create(:inbox, account: account)
       create(:inbox_member, user: agent, inbox: second_inbox)
-      kanban_board.update!(inbox_scope_mode: 'selected_inboxes')
-      create(:kanban_board_inbox, account: account, kanban_board: kanban_board, inbox: inbox)
+      restrict_board_to_inboxes(kanban_board, inbox)
       create_visible_card(position: 1, inbox: inbox)
       create_visible_card(position: 2, inbox: second_inbox)
 
@@ -114,10 +113,10 @@ RSpec.describe 'Kanban stage cards API', type: :request do
 
     it 'filters cards and pagination by assignee ids' do
       second_agent = create(:user, account: account, role: :agent)
-      create_conversation_card(position: 1, assignee: agent)
+      create_conversation_card(position: 1, assignees: [agent])
       filtered_cards = [
-        create_conversation_card(position: 2, assignee: second_agent),
-        create_conversation_card(position: 3, assignee: second_agent)
+        create_conversation_card(position: 2, assignees: [second_agent]),
+        create_conversation_card(position: 3, assignees: [second_agent])
       ]
 
       get stage_cards_path,
@@ -135,7 +134,7 @@ RSpec.describe 'Kanban stage cards API', type: :request do
     end
 
     it 'ignores duplicate assignee ids in the filter' do
-      card = create_conversation_card(position: 1, assignee: agent)
+      card = create_conversation_card(position: 1, assignees: [agent])
 
       get stage_cards_path,
           headers: agent.create_new_auth_token,
@@ -162,13 +161,13 @@ RSpec.describe 'Kanban stage cards API', type: :request do
       second_agent = create(:user, account: account, role: :agent)
       second_inbox = create(:inbox, account: account)
       create(:inbox_member, user: agent, inbox: second_inbox)
-      create_conversation_card(position: 1, inbox: inbox, assignee: second_agent)
-      filtered_card = create_conversation_card(position: 2, inbox: second_inbox, assignee: second_agent)
-      create_conversation_card(position: 3, inbox: second_inbox, assignee: agent)
+      create_conversation_card(position: 1, inbox: inbox, assignees: [second_agent])
+      filtered_card = create_conversation_card(position: 2, inbox: second_inbox, assignees: [second_agent])
+      create_conversation_card(position: 3, inbox: second_inbox, assignees: [agent])
 
       get stage_cards_path,
           headers: agent.create_new_auth_token,
-          params: { inbox_ids: [second_inbox.id], assignee_ids: [second_agent.id] },
+          params: { inbox_ids: [second_inbox.id], assignee_ids: [second_agent.id], match_mode: 'all' },
           as: :json
 
       expect(response).to have_http_status(:success)
@@ -176,9 +175,9 @@ RSpec.describe 'Kanban stage cards API', type: :request do
       expect(response.parsed_body['pagination']['total_count']).to eq(1)
     end
 
-    it 'excludes manual cards when assignee filter is active' do
-      manual_card = create_visible_card(position: 1)
-      conversation_card = create_conversation_card(position: 2, assignee: agent)
+    it 'keeps manual cards when they carry the filtered assignee' do
+      manual_card = create_visible_card(position: 1, assignees: [agent])
+      unassigned_card = create_visible_card(position: 2)
 
       get stage_cards_path,
           headers: agent.create_new_auth_token,
@@ -186,8 +185,8 @@ RSpec.describe 'Kanban stage cards API', type: :request do
           as: :json
 
       expect(response).to have_http_status(:success)
-      expect(response.parsed_body['cards'].pluck('id')).to eq([conversation_card.id])
-      expect(response.parsed_body['cards'].pluck('id')).not_to include(manual_card.id)
+      expect(response.parsed_body['cards'].pluck('id')).to eq([manual_card.id])
+      expect(response.parsed_body['cards'].pluck('id')).not_to include(unassigned_card.id)
       expect(response.parsed_body['pagination']['total_count']).to eq(1)
     end
 
@@ -353,7 +352,7 @@ RSpec.describe 'Kanban stage cards API', type: :request do
       query_counts = stage_cards_query_counts(sql_queries)
 
       expect(response).to have_http_status(:success)
-      expect(query_counts.slice(:messages, :notes, :labels_tags_taggings)).to eq(messages: 0, notes: 0, labels_tags_taggings: 0)
+      expect(query_counts).to include(messages: 0, notes: 0, labels_tags_taggings: be <= 1)
     end
 
     it 'returns 404 when board is not visible to agent' do
@@ -374,8 +373,81 @@ RSpec.describe 'Kanban stage cards API', type: :request do
     end
   end
 
+  describe 'DELETE /api/v1/accounts/{account.id}/kanban_boards/{kanban_board.id}/stages/{kanban_stage.id}/cards' do
+    it 'deletes every card with a bounded number of queries' do
+      create_visible_cards(10)
+
+      sql_queries = collect_sql_queries do
+        delete stage_cards_path, headers: administrator.create_new_auth_token, as: :json
+      end
+
+      expect(response).to have_http_status(:no_content)
+      expect(kanban_stage.kanban_cards.active).to be_empty
+      expect(stage_card_deletion_query_count(sql_queries)).to be <= 20
+    end
+
+    it 'cleans up dependent data and keeps automation logs' do
+      card = create_visible_card
+      product = KanbanCardProduct.create!(
+        account: account,
+        kanban_card: card,
+        sku: 'bulk-delete-product',
+        name: 'Product',
+        unit_price: 10,
+        quantity: 1
+      )
+      event = create(:kanban_card_event, account: account, kanban_card: card)
+      note = create(:kanban_card_note, account: account, kanban_card: card)
+      note.attachments.attach(io: StringIO.new('attachment'), filename: 'attachment.txt', content_type: 'text/plain')
+      attachment_id = note.attachments.first.id
+      automation_rule = create(:kanban_automation_rule, account: account, kanban_board: kanban_board)
+      automation_log = create(:kanban_automation_log, account: account, kanban_automation_rule: automation_rule, kanban_card: card)
+      card.update_labels(['bulk-delete'])
+      tagging_ids = card.taggings.ids
+
+      delete stage_cards_path, headers: administrator.create_new_auth_token, as: :json
+
+      deleted_records_exist = [
+        KanbanCard.exists?(card.id),
+        KanbanCardProduct.exists?(product.id),
+        KanbanCardEvent.exists?(event.id),
+        KanbanCardNote.exists?(note.id),
+        ActiveStorage::Attachment.exists?(attachment_id)
+      ]
+      expect(response).to have_http_status(:no_content)
+      expect(deleted_records_exist).to all(be(false))
+      expect(ActsAsTaggableOn::Tagging.where(id: tagging_ids)).to be_empty
+      expect(automation_log.reload.kanban_card_id).to be_nil
+    end
+  end
+
+  describe 'PATCH /api/v1/accounts/{account.id}/kanban_boards/{kanban_board.id}/stages/{kanban_stage.id}/move_cards' do
+    it 'records events in bulk and loads automation rules once' do
+      cards = create_visible_cards(3)
+      target_stage = create(:kanban_stage, account: account, kanban_board: kanban_board)
+      create(:kanban_automation_rule, account: account, kanban_board: kanban_board, active: true, event_name: 'stage_changed')
+
+      sql_queries = collect_sql_queries do
+        patch stage_move_cards_path,
+              headers: administrator.create_new_auth_token,
+              params: { target_stage_id: target_stage.id },
+              as: :json
+      end
+
+      rule_queries = sql_queries.count { |sql| sql.match?(/FROM "kanban_automation_rules"|JOIN "kanban_automation_rules"/) }
+      expect(response).to have_http_status(:no_content)
+      expect(cards.map { |card| card.reload.kanban_stage_id }).to all(eq(target_stage.id))
+      expect(KanbanCardEvent.where(kanban_card_id: cards, event_type: 'stage_changed').count).to eq(3)
+      expect(rule_queries).to eq(1)
+    end
+  end
+
   def stage_cards_path(stage: kanban_stage)
     "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}/stages/#{stage.id}/cards"
+  end
+
+  def stage_move_cards_path
+    "/api/v1/accounts/#{account.id}/kanban_boards/#{kanban_board.id}/stages/#{kanban_stage.id}/move_cards"
   end
 
   def create_visible_cards(count)
@@ -385,7 +457,8 @@ RSpec.describe 'Kanban stage cards API', type: :request do
   end
 
   def create_visible_card(attributes = {})
-    create(
+    card_assignees = attributes.delete(:assignees)
+    card = create(
       :kanban_card,
       {
         account: account,
@@ -397,6 +470,8 @@ RSpec.describe 'Kanban stage cards API', type: :request do
         position: 1
       }.merge(attributes)
     )
+    card.update_assignees!(card_assignees.map(&:id)) if card_assignees.present?
+    card
   end
 
   def create_conversation_card(attributes = {})
@@ -414,8 +489,9 @@ RSpec.describe 'Kanban stage cards API', type: :request do
 
   def compact_card_keys
     %w[
-      id kanban_stage_id position origin subject active due_at stage_entered_at contact inbox conversation_id priority conversation assignee
-      moved_by_id moved_at card_priority assignees
+      id kanban_stage_id previous_stage_id position origin subject active custom_field_keys kanban_reason_id
+      products items_total discount_type discount_amount discount_value value due_at labels stage_entered_at
+      contact inbox conversation_id priority card_priority assignees conversation assignee moved_by_id moved_at
     ]
   end
 
@@ -438,6 +514,12 @@ RSpec.describe 'Kanban stage cards API', type: :request do
       notes: sql_queries.count { |sql| sql.match?(/FROM "notes"|JOIN "notes"/) },
       labels_tags_taggings: labels_tags_taggings_query_count(sql_queries)
     }
+  end
+
+  def stage_card_deletion_query_count(sql_queries)
+    sql_queries.count do |sql|
+      sql.match?(/kanban_cards|kanban_card_|kanban_automation_logs|taggings/)
+    end
   end
 
   def labels_tags_taggings_query_count(sql_queries)

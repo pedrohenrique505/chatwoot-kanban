@@ -1,16 +1,22 @@
+# rubocop:disable Metrics/ClassLength
 class Waha::IncomingMessageService
-  IGNORED_CHAT_SUFFIXES = %w[@newsletter status@broadcast].freeze
   SENT_FROM_WHATSAPP_LABEL = 'Enviado pelo WhatsApp'.freeze
   EDITED_LABEL = '✏️ Editada'.freeze
 
   # `edited_original`, when present, means this message is the edited version of
   # an existing one: we tag its content and quote the original message.
-  pattr_initialize [:channel!, :payload!, :edited_original]
+  # `media_terminal`, when true, means the caller already exhausted the media
+  # download retries for this event: skip the network attempt and persist with
+  # a visible fallback instead of failing (and retrying) again.
+  pattr_initialize [:channel!, :payload!, :edited_original, :media_terminal]
 
   def perform
-    return if ignored_chat?
-    return if group_message_disabled?
-    return if message_already_exists?
+    policy = Waha::InboundEventPolicy.message(chat_id, groups_enabled: channel.groups_enabled)
+    Waha::InboundEventPolicy.observe(channel: channel, event: 'message.any', decision: policy)
+    return if policy.action == :ignore
+
+    existing = find_canonical_message
+    return deduplicated(existing, :already_mapped) if existing
 
     if edited_original
       # An edit reuses the original message's conversation and contact. The edit
@@ -26,15 +32,68 @@ class Waha::IncomingMessageService
       @contact = @contact_inbox.contact
     end
 
-    ActiveRecord::Base.transaction do
-      set_conversation unless @conversation
-      create_message
-      clear_pending_editor
-      clear_migrated_reactions
-    end
+    existing = find_canonical_message
+    return deduplicated(existing, :already_mapped) if existing
+
+    # Downloading media and resolving @mentions can each block on a WAHA call, so
+    # both happen before the transaction opens rather than pinning a connection
+    # for the whole fetch.
+    converter.download
+    @text_content = build_text_content
+    persist
   end
 
   private
+
+  def persist
+    Waha::Locking.with_chat_lock(channel, lock_chat_jids) do
+      # Re-check under lock: the download above can take up to a minute, and the
+      # same event can be in flight twice (Sidekiq delivers at least once, and WAHA
+      # retries webhooks it considers failed) or race with history import.
+      existing = find_canonical_message
+      return deduplicated(existing, :already_mapped) if existing
+
+      ActiveRecord::Base.transaction do
+        set_conversation unless @conversation
+        create_message
+        record_canonical_mapping!
+        clear_pending_editor
+        clear_migrated_reactions
+        persisted(@message)
+      end
+    end
+  rescue ActiveRecord::RecordNotUnique, ActiveRecord::RecordInvalid
+    # The database unique index on waha_message_mappings is the final guarantee:
+    # if concurrent execution bypassed the lock or raced within it, the loser
+    # transaction was rolled back, leaving zero duplicate messages in the DB.
+    # Return the winning persisted message idempotently.
+    winner = find_canonical_message || raise
+    deduplicated(winner, :unique_violation)
+  end
+
+  # Every path that ends in "this event already exists" reports the same signal
+  # with a distinct reason, so a spike in webhook replays, a live/history race
+  # and a lock that was bypassed under concurrency stay separable.
+  def deduplicated(existing, reason)
+    Waha::Telemetry.emit(
+      :message_deduplicated, **signal_context, reason: reason, message_id: existing.id,
+                                               level: reason == :unique_violation ? :info : :debug
+    )
+    existing
+  end
+
+  def persisted(message)
+    Waha::Telemetry.emit(
+      :message_persisted, **signal_context, message_id: message.id, conversation_id: message.conversation_id,
+                                            attachments: message.attachments.size
+    )
+    message
+  end
+
+  def signal_context
+    { channel: channel, chat: canonical_chat_jid, event: event_type, waha_id: stanza.presence,
+      direction: incoming? ? :incoming : :outgoing }
+  end
 
   def chat_id
     # `_data.Info.Chat` is always the conversation JID regardless of direction
@@ -50,43 +109,74 @@ class Waha::IncomingMessageService
   end
 
   def sender_jid
-    # In groups, _data.author is the participant who sent; otherwise it's from.
-    @sender_jid ||= payload.dig('_data', 'author').presence || payload['from']
+    # `participant` is WAHA's normalized group-sender field; _data.author covers
+    # engines that don't set it. Outside a group both are absent and `from` applies.
+    @sender_jid ||= payload['participant'].presence || payload.dig('_data', 'author').presence || payload['from']
   end
 
   def push_name
     payload.dig('_data', 'Info', 'PushName').presence || payload.dig('_data', 'pushName')
   end
 
+  # Resolves the group participant who actually sent this message. The group
+  # itself is the conversation's contact, so this only produces the structured
+  # sender metadata stored on the message — no ContactInbox is created for
+  # someone who has no direct conversation. Purely a display enrichment, so a
+  # failure here must not block the message itself.
+  def resolve_participant
+    return @resolve_participant if defined?(@resolve_participant)
+
+    @resolve_participant = Waha::ParticipantResolver.new(
+      channel: channel,
+      jid: sender_jid,
+      push_name: (push_name if incoming?),
+      sender_alt: payload.dig('_data', 'Info', 'SenderAlt')
+    ).perform
+  rescue StandardError => e
+    Waha::Telemetry.emit(
+      :enrichment_failed, channel: channel, chat: chat_id, level: :warn, reason: :group_participant, scope: :live, error: e.class.name
+    )
+    @resolve_participant = nil
+  end
+
   def source_id
     @source_id ||= payload['id']
   end
 
-  def stanza_id
-    @stanza_id ||= source_id.to_s.split('_').last
+  def stanza
+    @stanza ||= Waha::Anchoring.stanza_of(source_id)
   end
 
-  def ignored_chat?
-    IGNORED_CHAT_SUFFIXES.any? { |suffix| chat_id.to_s.end_with?(suffix) }
+  def canonical_chat_jid
+    @conversation&.contact_inbox&.source_id || @contact_inbox&.source_id || chat_id
   end
 
-  def group_message_disabled?
-    chat_id.to_s.end_with?('@g.us') && !channel.groups_enabled
+  def candidate_chat_jids
+    [@conversation&.contact_inbox&.source_id, @contact_inbox&.source_id, chat_id].compact.uniq
   end
 
-  def message_already_exists?
-    inbox.messages.exists?(['source_id LIKE ?', "%_#{stanza_id}"])
+  def lock_chat_jids
+    candidate_chat_jids
+  end
+
+  def event_type
+    edited_original ? :edit : :message
+  end
+
+  def find_canonical_message
+    return nil if stanza.blank?
+
+    mapping = WahaMessageMapping.find_mapping(
+      channel: channel,
+      chat_jid: candidate_chat_jids,
+      external_id: stanza,
+      event_type: event_type
+    )
+    mapping&.message
   end
 
   def resolve_contact
-    Waha::ContactResolver.new(
-      channel: channel,
-      jid: chat_id,
-      push_name: push_name,
-      from_me: payload['fromMe'],
-      sender_alt: payload.dig('_data', 'Info', 'SenderAlt'),
-      recipient_alt: payload.dig('_data', 'Info', 'RecipientAlt')
-    ).perform
+    Waha::ContactResolver.from_payload(channel: channel, jid: chat_id, payload: payload).perform
   end
 
   # WAHA has no UI toggle for `lock_to_single_conversation`, so we hardcode the
@@ -94,6 +184,12 @@ class Waha::IncomingMessageService
   # conversation (Message#reopen_conversation reopens it if resolved) instead
   # of spawning a new one.
   def set_conversation
+    # A contact sending several messages in a row is the normal case on WhatsApp,
+    # and those arrive as separate webhooks processed by separate workers. Without
+    # this lock each of them finds no conversation and creates one, splitting the
+    # contact across duplicates. The contact_inbox row is the natural serialization
+    # point for "this contact in this inbox" and is held only for this transaction.
+    @contact_inbox.lock!
     @conversation = @contact_inbox.conversations.last
 
     return if @conversation
@@ -108,19 +204,42 @@ class Waha::IncomingMessageService
 
   def create_message
     @message = @conversation.messages.build(
-      content: text_content,
+      content: @text_content,
       account_id: inbox.account_id,
       inbox_id: inbox.id,
       message_type: incoming? ? :incoming : :outgoing,
       sender: message_sender,
-      source_id: source_id,
       status: initial_status,
       content_attributes: build_content_attributes,
       additional_attributes: build_additional_attributes
     )
 
-    Waha::MediaAttacher.new(channel: channel, payload: payload, message: @message).attach
+    converter.attach(@message)
     @message.save!
+  end
+
+  def converter
+    @converter ||= Waha::MessageConverters::Registry.for(channel: channel, payload: payload, terminal: media_terminal)
+  end
+
+  # chat_jid comes from the conversation's contact_inbox rather than this
+  # payload's own chat_id: a DM can carry an @lid one message and its resolved
+  # @c.us the next (ContactResolver#resolve_jid finds the same contact_inbox
+  # either way), and the canonical mapping must not fragment one real chat
+  # across two chat_jid values depending on which shape a given event happened
+  # to carry.
+  def record_canonical_mapping!
+    WahaMessageMapping.create_canonical!(
+      channel: channel,
+      message: @message,
+      chat_jid: canonical_chat_jid,
+      external_id: stanza,
+      direction: incoming? ? :incoming : :outgoing,
+      event_type: event_type,
+      provider_id: source_id,
+      anchor_message: (Waha::Anchoring.family_anchor_message(edited_original) if edited_original),
+      participant_jid: chat_id.to_s.end_with?('@g.us') ? sender_jid : nil
+    )
   end
 
   # For a mirrored outgoing message the payload already carries the WhatsApp ack,
@@ -169,22 +288,15 @@ class Waha::IncomingMessageService
     # Incoming, or an agent-attributed edit: the sender association already names
     # the author, so no sender_name override is needed. Everything else outgoing
     # (a phone-sent message or a phone-side edit) keeps the WhatsApp label.
-    attrs = if incoming? || (edited_original && pending_editor)
-              {}
-            else
-              { sender_name: SENT_FROM_WHATSAPP_LABEL }
-            end
-
-    # Anchor every edit mirror to the original message's source_id so the whole
-    # edit family can be found later (to strike the previous head, and to resolve
-    # replies back to the single real WhatsApp message).
-    attrs[:edit_of] = edited_original.source_id if edited_original
-
-    attrs
+    if incoming? || (edited_original && pending_editor)
+      {}
+    else
+      { sender_name: SENT_FROM_WHATSAPP_LABEL }
+    end
   end
 
-  def text_content
-    body = payload['body'].presence
+  def build_text_content
+    body = converter.content
     return body unless edited_original && body
 
     "#{body} [#{EDITED_LABEL}]"
@@ -192,11 +304,13 @@ class Waha::IncomingMessageService
 
   def build_content_attributes
     attrs = Waha::ReplyContextResolver.new(channel: channel, payload: payload, conversation: @conversation).perform
+    attrs.merge!(converter.metadata)
 
-    # Store participant name for group messages
+    # Store the structured group sender — never a prefix on the message body.
     if chat_id.to_s.end_with?('@g.us')
-      attrs[:sender_name] = push_name
+      attrs[:sender_name] = resolve_participant&.name
       attrs[:participant_jid] = sender_jid
+      attrs[:participant_phone] = resolve_participant&.phone_number
     end
 
     merge_edit_context(attrs)
@@ -212,9 +326,7 @@ class Waha::IncomingMessageService
     return @previous_reactions_holder if defined?(@previous_reactions_holder)
     return @previous_reactions_holder = nil unless edited_original
 
-    anchor_source_id = edited_original.additional_attributes['edit_of'].presence || edited_original.source_id
-    family = inbox.messages.where(source_id: anchor_source_id)
-                  .or(inbox.messages.where("additional_attributes->>'edit_of' = ?", anchor_source_id))
+    family = Waha::Anchoring.family(inbox, edited_original)
     @previous_reactions_holder = family.find { |member| member.content_attributes['reactions'].present? }
   end
 
@@ -234,7 +346,7 @@ class Waha::IncomingMessageService
 
     attrs.delete(:in_reply_to_snapshot)
     attrs[:in_reply_to] = Waha::ReplyContextResolver.family_head(inbox, edited_original).id
-    attrs[:in_reply_to_external_id] = edited_original.source_id
+    attrs[:in_reply_to_external_id] = Waha::Anchoring.external_anchor_source_id(edited_original)
     attrs[:reactions] = previous_reactions_holder.content_attributes['reactions'] if previous_reactions_holder
   end
 
@@ -242,3 +354,4 @@ class Waha::IncomingMessageService
     @inbox ||= channel.inbox
   end
 end
+# rubocop:enable Metrics/ClassLength

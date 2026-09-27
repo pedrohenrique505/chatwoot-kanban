@@ -1,8 +1,14 @@
 <script setup>
 import { computed, ref, watch, inject } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { useStore, useMapGetter } from 'dashboard/composables/store';
-import { frontendURL, conversationUrl } from 'dashboard/helper/URLHelper';
+import {
+  frontendURL,
+  conversationUrl,
+  kanbanConversationUrl,
+} from 'dashboard/helper/URLHelper';
+import { useEmbeddedConversation } from 'dashboard/composables/useEmbeddedConversation';
+import { pushEmbedded } from 'dashboard/helper/embeddedConversationHistory';
 import ConversationCard from './widgets/conversation/ConversationCard.vue';
 import ConversationCardExpanded from 'dashboard/components-next/Conversation/ConversationCard/ConversationCardExpanded.vue';
 import ContextMenu from 'dashboard/components/ui/ContextMenu.vue';
@@ -14,11 +20,14 @@ const props = defineProps({
   label: { type: String, default: '' },
   conversationType: { type: String, default: '' },
   foldersId: { type: [String, Number], default: 0 },
+  assigneeType: { type: String, default: 'all' },
   showExpanded: { type: Boolean, default: false },
 });
 
+const route = useRoute();
 const router = useRouter();
 const store = useStore();
+const embedded = useEmbeddedConversation();
 
 const selectConversation = inject('selectConversation');
 const deSelectConversation = inject('deSelectConversation');
@@ -81,6 +90,7 @@ const conversationPath = computed(() =>
       teamId: props.teamId,
       conversationType: props.conversationType,
       foldersId: props.foldersId,
+      assigneeType: props.assigneeType,
     })
   )
 );
@@ -89,6 +99,8 @@ const onCardClick = e => {
   const path = conversationPath.value;
   if (!path) return;
 
+  // A new tab leaves the board behind, so it gets the conversation's own
+  // route rather than the board-embedded one.
   if (e.metaKey || e.ctrlKey) {
     e.preventDefault();
     window.open(
@@ -100,6 +112,26 @@ const onCardClick = e => {
   }
 
   if (isActiveChat.value) return;
+
+  // Staying embedded keeps the board a back button away. The card_id of the
+  // conversation we came from is dropped: it belongs to that conversation.
+  if (embedded.value) {
+    pushEmbedded(
+      router,
+      {
+        path: frontendURL(
+          kanbanConversationUrl({
+            accountId: accountId.value,
+            boardId: route.params.boardId,
+            conversationId: props.source.id,
+          })
+        ),
+      },
+      true
+    );
+    return;
+  }
+
   router.push({ path });
 };
 
